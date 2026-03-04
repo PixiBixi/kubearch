@@ -28,7 +28,7 @@ dockers:
     goos: linux
     goarch: amd64
     image_templates:
-      - "ghcr.io/PixiBixi/kubearch:{{ .Tag }}-amd64"
+      - "ghcr.io/pixibixi/kubearch:{{ .Tag }}-amd64"
     dockerfile: Dockerfile.release
     use: buildx
     build_flag_templates:
@@ -44,7 +44,7 @@ dockers:
     goos: linux
     goarch: arm64
     image_templates:
-      - "ghcr.io/PixiBixi/kubearch:{{ .Tag }}-arm64"
+      - "ghcr.io/pixibixi/kubearch:{{ .Tag }}-arm64"
     dockerfile: Dockerfile.release
     use: buildx
     build_flag_templates:
@@ -56,15 +56,15 @@ dockers:
       - "--label=org.opencontainers.image.source=https://github.com/PixiBixi/kubearch"
 
 docker_manifests:
-  - name_template: "ghcr.io/PixiBixi/kubearch:{{ .Tag }}"
+  - name_template: "ghcr.io/pixibixi/kubearch:{{ .Tag }}"
     image_templates:
-      - "ghcr.io/PixiBixi/kubearch:{{ .Tag }}-amd64"
-      - "ghcr.io/PixiBixi/kubearch:{{ .Tag }}-arm64"
+      - "ghcr.io/pixibixi/kubearch:{{ .Tag }}-amd64"
+      - "ghcr.io/pixibixi/kubearch:{{ .Tag }}-arm64"
 
-  - name_template: "ghcr.io/PixiBixi/kubearch:latest"
+  - name_template: "ghcr.io/pixibixi/kubearch:latest"
     image_templates:
-      - "ghcr.io/PixiBixi/kubearch:{{ .Tag }}-amd64"
-      - "ghcr.io/PixiBixi/kubearch:{{ .Tag }}-arm64"
+      - "ghcr.io/pixibixi/kubearch:{{ .Tag }}-amd64"
+      - "ghcr.io/pixibixi/kubearch:{{ .Tag }}-arm64"
 
 archives:
   - id: default
