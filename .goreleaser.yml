@@ -1,0 +1,114 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+    - go mod verify
+
+builds:
+  - id: kubearch
+    binary: kubearch
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+dockers:
+  - id: kubearch-amd64
+    ids: [kubearch]
+    goos: linux
+    goarch: amd64
+    image_templates:
+      - "ghcr.io/PixiBixi/kubearch:{{ .Tag }}-amd64"
+    dockerfile: Dockerfile.release
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+      - "--label=org.opencontainers.image.title={{.ProjectName}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
+      - "--label=org.opencontainers.image.source=https://github.com/PixiBixi/kubearch"
+
+  - id: kubearch-arm64
+    ids: [kubearch]
+    goos: linux
+    goarch: arm64
+    image_templates:
+      - "ghcr.io/PixiBixi/kubearch:{{ .Tag }}-arm64"
+    dockerfile: Dockerfile.release
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+      - "--label=org.opencontainers.image.title={{.ProjectName}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
+      - "--label=org.opencontainers.image.source=https://github.com/PixiBixi/kubearch"
+
+docker_manifests:
+  - name_template: "ghcr.io/PixiBixi/kubearch:{{ .Tag }}"
+    image_templates:
+      - "ghcr.io/PixiBixi/kubearch:{{ .Tag }}-amd64"
+      - "ghcr.io/PixiBixi/kubearch:{{ .Tag }}-arm64"
+
+  - name_template: "ghcr.io/PixiBixi/kubearch:latest"
+    image_templates:
+      - "ghcr.io/PixiBixi/kubearch:{{ .Tag }}-amd64"
+      - "ghcr.io/PixiBixi/kubearch:{{ .Tag }}-arm64"
+
+archives:
+  - id: default
+    format: tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end }}
+    format_overrides: []
+    files:
+      - README.md
+      - LICENSE*
+      - deploy/*.yaml
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - 'typo'
+  groups:
+    - title: Features
+      regexp: '^feat:'
+      order: 0
+    - title: Bug Fixes
+      regexp: '^fix:'
+      order: 1
+    - title: Others
+      order: 999
+
+release:
+  github:
+    owner: "PixiBixi"
+    name: kubearch
+  name_template: "{{.ProjectName}} {{.Version}}"
+  draft: false
+  prerelease: auto

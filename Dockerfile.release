@@ -1,0 +1,9 @@
+# Slim image for GoReleaser — the binary is pre-compiled and injected by goreleaser.
+# For local development builds, use the multi-stage Dockerfile instead.
+FROM gcr.io/distroless/static:nonroot
+
+COPY kubearch /kubearch
+
+EXPOSE 9101
+
+ENTRYPOINT ["/kubearch"]
