@@ -15,7 +15,11 @@ import (
 	"github.com/PixiBixi/kubearch/internal/store"
 )
 
-const maxConcurrentInspections = 10
+const (
+	maxConcurrentInspections = 10
+	// shortDigestLen is "sha256:" (7 chars) + 12 hex chars — enough to identify a digest in logs.
+	shortDigestLen = 19
+)
 
 // Watcher watches Kubernetes pod events and triggers image inspections for new images.
 type Watcher struct {
@@ -137,12 +141,15 @@ func toPod(obj any) (*corev1.Pod, bool) {
 // Go 1.23: returns iter.Seq[string] for use with range.
 func uniqueImages(pod *corev1.Pod) iter.Seq[string] {
 	return func(yield func(string) bool) {
-		seen := make(map[string]bool)
+		seen := make(map[string]struct{})
 		for img := range containerImages(pod) {
-			if img == "" || seen[img] {
+			if img == "" {
 				continue
 			}
-			seen[img] = true
+			if _, ok := seen[img]; ok {
+				continue
+			}
+			seen[img] = struct{}{}
 			if !yield(img) {
 				return
 			}
@@ -180,10 +187,10 @@ func pullSecretNames(pod *corev1.Pod) []string {
 	return names
 }
 
-// shortDigest returns the first 19 characters of a digest (algo + 12 chars of hash).
+// shortDigest returns the first shortDigestLen characters of a digest for log display.
 func shortDigest(digest string) string {
-	if len(digest) > 19 {
-		return digest[:19]
+	if len(digest) > shortDigestLen {
+		return digest[:shortDigestLen]
 	}
 	return digest
 }

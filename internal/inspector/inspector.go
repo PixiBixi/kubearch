@@ -68,14 +68,14 @@ func (i *Inspector) Inspect(ctx context.Context, imageRef string, auth PodAuth) 
 		if err != nil {
 			return "", nil, fmt.Errorf("parse index manifest: %w", err)
 		}
-		seen := make(map[types.Platform]bool)
+		seen := make(map[types.Platform]struct{})
 		for _, m := range manifest.Manifests {
 			if m.Platform == nil || m.Platform.OS == "" || m.Platform.OS == "unknown" {
 				continue // skip attestation blobs and malformed entries
 			}
 			p := types.Platform{OS: m.Platform.OS, Arch: m.Platform.Architecture}
-			if !seen[p] {
-				seen[p] = true
+			if _, ok := seen[p]; !ok {
+				seen[p] = struct{}{}
 				platforms = append(platforms, p)
 			}
 		}
