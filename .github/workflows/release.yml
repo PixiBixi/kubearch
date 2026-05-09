@@ -39,3 +39,14 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push Helm chart to OCI
+        run: |
+          CHART_VERSION="${GITHUB_REF_NAME#v}"
+          helm registry login ghcr.io \
+            --username "${{ github.repository_owner }}" \
+            --password "${{ secrets.GITHUB_TOKEN }}"
+          helm package charts/kubearch \
+            --version "$CHART_VERSION" \
+            --app-version "$CHART_VERSION"
+          helm push "kubearch-${CHART_VERSION}.tgz" oci://ghcr.io/pixibixi/kubearch/charts
