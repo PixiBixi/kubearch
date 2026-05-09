@@ -1,0 +1,18 @@
+kubearch {{ .Chart.AppVersion }} deployed successfully.
+
+Metrics endpoint:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "kubearch.fullname" . }} 9101:9101
+  curl http://localhost:9101/metrics
+
+{{- if .Values.watchNamespace }}
+Watching namespace: {{ .Values.watchNamespace }}
+{{- else }}
+Watching: all namespaces
+{{- end }}
+
+{{- if not .Values.serviceMonitor.enabled }}
+
+NOTE: serviceMonitor.enabled is false. To enable Prometheus scraping via
+Prometheus Operator, set serviceMonitor.enabled=true and add the matching
+label for your Prometheus instance (e.g. serviceMonitor.labels.release=kube-prometheus-stack).
+{{- end }}

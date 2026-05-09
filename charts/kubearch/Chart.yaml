@@ -1,0 +1,18 @@
+apiVersion: v2
+name: kubearch
+description: Kubernetes Prometheus exporter for container image multi-arch support
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - kubernetes
+  - prometheus
+  - exporter
+  - multi-arch
+  - oci
+home: https://github.com/PixiBixi/kubearch
+sources:
+  - https://github.com/PixiBixi/kubearch
+maintainers:
+  - name: PixiBixi
+    url: https://github.com/PixiBixi

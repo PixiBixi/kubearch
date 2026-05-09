@@ -1,0 +1,72 @@
+# Default values for kubearch.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/PixiBixi/kubearch
+  pullPolicy: IfNotPresent
+  # Defaults to .Chart.AppVersion when empty.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Restrict watch to a single namespace.
+# Leave empty to watch all namespaces (requires ClusterRole).
+# When set, a namespace-scoped Role is created instead.
+watchNamespace: ""
+
+serviceAccount:
+  # Create a dedicated ServiceAccount.
+  create: true
+  annotations: {}
+  # Defaults to the fullname of the release when empty.
+  name: ""
+
+rbac:
+  # Create the required Role/ClusterRole and binding.
+  create: true
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9101"
+  prometheus.io/path: "/metrics"
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+service:
+  type: ClusterIP
+  port: 9101
+
+serviceMonitor:
+  # Enable ServiceMonitor for Prometheus Operator (kube-prometheus-stack, etc.).
+  enabled: false
+  # Scrape interval — kubearch data only changes on pod events, 60s is sufficient.
+  interval: 60s
+  scrapeTimeout: 10s
+  # Extra labels to add to the ServiceMonitor (e.g. to match your Prometheus selector).
+  # labels:
+  #   release: kube-prometheus-stack
+  labels: {}
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

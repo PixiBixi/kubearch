@@ -1,0 +1,67 @@
+{{- if .Values.rbac.create }}
+{{- if .Values.watchNamespace }}
+---
+# Namespace-scoped RBAC — used when watchNamespace is set.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kubearch.fullname" . }}
+  namespace: {{ .Values.watchNamespace }}
+  labels:
+    {{- include "kubearch.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets", "serviceaccounts"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kubearch.fullname" . }}
+  namespace: {{ .Values.watchNamespace }}
+  labels:
+    {{- include "kubearch.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kubearch.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kubearch.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- else }}
+---
+# Cluster-scoped RBAC — used when watching all namespaces (default).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kubearch.fullname" . }}
+  labels:
+    {{- include "kubearch.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets", "serviceaccounts"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kubearch.fullname" . }}
+  labels:
+    {{- include "kubearch.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kubearch.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kubearch.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}
