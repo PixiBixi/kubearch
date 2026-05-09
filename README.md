@@ -66,55 +66,11 @@ kubearch_image_platform_supported * on (image) group_left()
 
 ## Installation
 
-### Helm (recommended)
+### Docker image
 
-```bash
-helm upgrade --install kubearch oci://ghcr.io/PixiBixi/kubearch/charts/kubearch \
-  --namespace monitoring \
-  --create-namespace
-```
+Pre-built multi-arch images (`linux/amd64`, `linux/arm64`) are published to `ghcr.io/PixiBixi/kubearch`.
 
-With Prometheus Operator (kube-prometheus-stack):
-
-```bash
-helm upgrade --install kubearch oci://ghcr.io/PixiBixi/kubearch/charts/kubearch \
-  --namespace monitoring \
-  --create-namespace \
-  --set serviceMonitor.enabled=true \
-  --set serviceMonitor.labels.release=kube-prometheus-stack
-```
-
-Restricted to a single namespace:
-
-```bash
-helm upgrade --install kubearch oci://ghcr.io/PixiBixi/kubearch/charts/kubearch \
-  --namespace monitoring \
-  --create-namespace \
-  --set watchNamespace=production
-```
-
-> When `watchNamespace` is set, a namespace-scoped `Role` is created instead of a `ClusterRole`.
-
-## Helm values
-
-| Parameter | Default | Description |
-|---|---|---|
-| `image.repository` | `ghcr.io/PixiBixi/kubearch` | Container image repository |
-| `image.tag` | `""` (chart appVersion) | Image tag |
-| `image.pullPolicy` | `IfNotPresent` | Image pull policy |
-| `watchNamespace` | `""` | Namespace to watch. Empty = all namespaces (ClusterRole). Set = namespace-scoped Role. |
-| `serviceAccount.create` | `true` | Create a dedicated ServiceAccount |
-| `serviceAccount.annotations` | `{}` | Annotations for the ServiceAccount (e.g. Workload Identity) |
-| `rbac.create` | `true` | Create the required Role/ClusterRole and binding |
-| `serviceMonitor.enabled` | `false` | Create a Prometheus Operator ServiceMonitor |
-| `serviceMonitor.interval` | `60s` | Scrape interval (data changes on pod events, 60s is enough) |
-| `serviceMonitor.labels` | `{}` | Extra labels for the ServiceMonitor (to match your Prometheus selector) |
-| `resources.requests.cpu` | `10m` | CPU request |
-| `resources.requests.memory` | `64Mi` | Memory request |
-| `resources.limits.memory` | `256Mi` | Memory limit |
-| `nodeSelector` | `{}` | Node selector |
-| `tolerations` | `[]` | Tolerations |
-| `affinity` | `{}` | Affinity rules |
+A Helm chart and raw Kubernetes manifests are planned — see the CLI flags section below for standalone usage in the meantime.
 
 ## CLI flags
 
@@ -193,8 +149,6 @@ make snapshot
 │   ├── inspector/inspector.go      # OCI manifest inspection (go-containerregistry)
 │   ├── watcher/watcher.go          # Kubernetes pod informer
 │   └── collector/collector.go      # prometheus.Collector implementation
-├── charts/kubearch/                # Helm chart
-├── deploy/                         # raw Kubernetes manifests
 ├── Dockerfile                      # multi-stage build (local dev)
 └── Dockerfile.release              # slim image used by GoReleaser
 ```

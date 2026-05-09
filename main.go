@@ -68,7 +68,12 @@ func main() {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collector.New(s))
 
-	go w.Run(ctx)
+	go func() {
+		if err := w.Run(ctx); err != nil {
+			logger.Error("watcher exited with error", "err", err)
+			stop()
+		}
+	}()
 
 	// Go 1.22+: method+path pattern routing in http.ServeMux.
 	mux := http.NewServeMux()
@@ -119,11 +124,11 @@ func buildK8sClient(kubeconfig, kubeContext string, logger *slog.Logger) (kubern
 		return nil, err
 	}
 
-	ctx := kubeContext
-	if ctx == "" {
-		ctx = "current"
+	ctxName := kubeContext
+	if ctxName == "" {
+		ctxName = "current"
 	}
-	logger.Info("config: kubeconfig", "context", ctx)
+	logger.Info("config: kubeconfig", "context", ctxName)
 	return kubernetes.NewForConfig(cfg)
 }
 
