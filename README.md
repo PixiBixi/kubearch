@@ -4,6 +4,8 @@
 ![License](https://img.shields.io/github/license/PixiBixi/kubearch)
 ![Docker](https://img.shields.io/badge/ghcr.io-PixiBixi%2Fkubearch-blue)
 
+<img src="scorecard.png" width="100%">
+
 **kubearch** is a Kubernetes Prometheus exporter that reports the CPU architectures supported by every container image running in your cluster — without pulling image layers.
 
 It reads each pod's image references, fetches the OCI manifest list from the registry, and exposes the supported platforms as Prometheus metrics. Useful for tracking multi-arch readiness, identifying images blocking arm64 migrations, or auditing mixed-architecture clusters.
