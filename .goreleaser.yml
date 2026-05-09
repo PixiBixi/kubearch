@@ -29,49 +29,20 @@ upx:
     lzma: true
     goos: [linux]
 
-dockers:
-  - id: kubearch-amd64
-    ids: [kubearch]
-    goos: linux
-    goarch: amd64
-    image_templates:
-      - "ghcr.io/pixibixi/kubearch:{{ .Tag }}-amd64"
-    dockerfile: Dockerfile.release
-    use: buildx
-    build_flag_templates:
-      - "--platform=linux/amd64"
-      - "--label=org.opencontainers.image.created={{.Date}}"
-      - "--label=org.opencontainers.image.title={{.ProjectName}}"
-      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
-      - "--label=org.opencontainers.image.version={{.Version}}"
-      - "--label=org.opencontainers.image.source=https://github.com/PixiBixi/kubearch"
-
-  - id: kubearch-arm64
-    ids: [kubearch]
-    goos: linux
-    goarch: arm64
-    image_templates:
-      - "ghcr.io/pixibixi/kubearch:{{ .Tag }}-arm64"
-    dockerfile: Dockerfile.release
-    use: buildx
-    build_flag_templates:
-      - "--platform=linux/arm64"
-      - "--label=org.opencontainers.image.created={{.Date}}"
-      - "--label=org.opencontainers.image.title={{.ProjectName}}"
-      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
-      - "--label=org.opencontainers.image.version={{.Version}}"
-      - "--label=org.opencontainers.image.source=https://github.com/PixiBixi/kubearch"
-
-docker_manifests:
-  - name_template: "ghcr.io/pixibixi/kubearch:{{ .Tag }}"
-    image_templates:
-      - "ghcr.io/pixibixi/kubearch:{{ .Tag }}-amd64"
-      - "ghcr.io/pixibixi/kubearch:{{ .Tag }}-arm64"
-
-  - name_template: "ghcr.io/pixibixi/kubearch:latest"
-    image_templates:
-      - "ghcr.io/pixibixi/kubearch:{{ .Tag }}-amd64"
-      - "ghcr.io/pixibixi/kubearch:{{ .Tag }}-arm64"
+kos:
+  - id: kubearch
+    repositories:
+      - ghcr.io/pixibixi/kubearch
+    base_image: gcr.io/distroless/static:nonroot
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    tags:
+      - "{{ .Version }}"
+      - "{{ .Major }}.{{ .Minor }}"
+      - "{{ .Major }}"
+      - '{{ if not .Prerelease }}latest{{ end }}'
+    bare: true
 
 archives:
   - id: default
