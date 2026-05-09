@@ -1,4 +1,4 @@
-kubearch
-kubearch-*
+/kubearch
+/kubearch-*
 dist/
 .desloppify/
