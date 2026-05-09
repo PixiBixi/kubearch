@@ -2,7 +2,7 @@
 
 # Build for current platform
 build:
-	go build -o kubearch .
+	go build -ldflags "-s -w" -o kubearch .
 
 # Build for all target platforms
 build-all:

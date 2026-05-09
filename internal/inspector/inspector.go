@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/google/go-containerregistry/pkg/authn/k8schain"
+	authnk8s "github.com/google/go-containerregistry/pkg/authn/kubernetes"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"k8s.io/client-go/kubernetes"
@@ -38,7 +38,7 @@ func (i *Inspector) Inspect(ctx context.Context, imageRef string, auth PodAuth) 
 		return "", nil, fmt.Errorf("parse reference %q: %w", imageRef, err)
 	}
 
-	kc, err := k8schain.New(ctx, i.k8sClient, k8schain.Options{
+	kc, err := authnk8s.New(ctx, i.k8sClient, authnk8s.Options{
 		Namespace:          auth.Namespace,
 		ServiceAccountName: auth.ServiceAccountName,
 		ImagePullSecrets:   auth.ImagePullSecrets,
