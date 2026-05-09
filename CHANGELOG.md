@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/PixiBixi/kubearch/compare/v0.3.0...v0.3.1) (2026-05-09)
+
+
+### Bug Fixes
+
+* **ci:** trigger release workflow on published release instead of tag push ([ac637aa](https://github.com/PixiBixi/kubearch/commit/ac637aa058735f9a9c2f7109c177b4de5e356374))
+
 ## [0.3.0](https://github.com/PixiBixi/kubearch/compare/v0.2.0...v0.3.0) (2026-05-09)
 
 
