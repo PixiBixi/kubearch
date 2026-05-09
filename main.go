@@ -62,7 +62,7 @@ func main() {
 	}
 
 	s := store.New()
-	insp := inspector.New(k8sClient)
+	insp := inspector.New(k8sClient, logger)
 	w := watcher.New(k8sClient, *namespace, s, insp, logger)
 
 	reg := prometheus.NewRegistry()

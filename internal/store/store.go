@@ -3,19 +3,15 @@ package store
 import (
 	"maps"
 	"sync"
-)
 
-// Platform represents a supported OS/architecture combination.
-type Platform struct {
-	OS   string
-	Arch string
-}
+	"github.com/PixiBixi/kubearch/internal/types"
+)
 
 // ImageInfo holds the inspection result for an image.
 type ImageInfo struct {
 	Ref       string // image reference as seen in pod spec
 	Digest    string
-	Platforms []Platform
+	Platforms []types.Platform
 }
 
 // Store is a thread-safe registry of image → platforms, with pod reference counting.
@@ -58,7 +54,7 @@ func (s *Store) TrackPodImage(podRef, imageRef string) bool {
 
 // SetImage stores the inspection result.
 // Skips storage if no pod references the image anymore (deleted during inspection).
-func (s *Store) SetImage(imageRef, digest string, platforms []Platform) {
+func (s *Store) SetImage(imageRef, digest string, platforms []types.Platform) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
