@@ -22,6 +22,13 @@ builds:
       - -X main.commit={{.Commit}}
       - -X main.date={{.Date}}
 
+upx:
+  - enabled: true
+    ids: [kubearch]
+    compress: best
+    lzma: true
+    goos: [linux]
+
 dockers:
   - id: kubearch-amd64
     ids: [kubearch]
