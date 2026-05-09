@@ -204,6 +204,15 @@ make snapshot
 └── Dockerfile.release              # slim image used by GoReleaser
 ```
 
+## Release
+
+Releases are automated via [release-please](https://github.com/googleapis/release-please):
+
+1. Push commits to `main` using [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `perf:`, etc.)
+2. release-please opens a release PR with an updated `CHANGELOG.md` and bumped version
+3. Merge the PR — release-please creates the tag automatically
+4. GoReleaser triggers and builds multi-arch binaries, Docker images (ghcr.io), and pushes the Helm chart to OCI
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

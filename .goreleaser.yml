@@ -119,3 +119,4 @@ release:
   name_template: "{{.ProjectName}} {{.Version}}"
   draft: false
   prerelease: auto
+  mode: replace

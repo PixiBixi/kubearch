@@ -2,3 +2,6 @@
 /kubearch-*
 dist/
 .desloppify/
+
+# Claude Code
+.claude/
