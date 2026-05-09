@@ -3,34 +3,30 @@ package store
 import (
 	"maps"
 	"sync"
-)
 
-// Platform represents a supported OS/architecture combination.
-type Platform struct {
-	OS   string
-	Arch string
-}
+	"github.com/PixiBixi/kubearch/internal/types"
+)
 
 // ImageInfo holds the inspection result for an image.
 type ImageInfo struct {
 	Ref       string // image reference as seen in pod spec
 	Digest    string
-	Platforms []Platform
+	Platforms []types.Platform
 }
 
 // Store is a thread-safe registry of image → platforms, with pod reference counting.
 type Store struct {
 	mu        sync.RWMutex
-	images    map[string]*ImageInfo      // imageRef → info (inspection done)
-	pending   map[string]struct{}        // imageRef → inspection in progress
-	podImages map[string]map[string]bool // podRef → set of imageRefs
+	images    map[string]*ImageInfo          // imageRef → info (inspection done)
+	pending   map[string]struct{}            // imageRef → inspection in progress
+	podImages map[string]map[string]struct{} // podRef → set of imageRefs
 }
 
 func New() *Store {
 	return &Store{
 		images:    make(map[string]*ImageInfo),
 		pending:   make(map[string]struct{}),
-		podImages: make(map[string]map[string]bool),
+		podImages: make(map[string]map[string]struct{}),
 	}
 }
 
@@ -41,9 +37,9 @@ func (s *Store) TrackPodImage(podRef, imageRef string) bool {
 	defer s.mu.Unlock()
 
 	if s.podImages[podRef] == nil {
-		s.podImages[podRef] = make(map[string]bool)
+		s.podImages[podRef] = make(map[string]struct{})
 	}
-	s.podImages[podRef][imageRef] = true
+	s.podImages[podRef][imageRef] = struct{}{}
 
 	if _, known := s.images[imageRef]; known {
 		return false
@@ -58,14 +54,14 @@ func (s *Store) TrackPodImage(podRef, imageRef string) bool {
 
 // SetImage stores the inspection result.
 // Skips storage if no pod references the image anymore (deleted during inspection).
-func (s *Store) SetImage(imageRef, digest string, platforms []Platform) {
+func (s *Store) SetImage(imageRef, digest string, platforms []types.Platform) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	delete(s.pending, imageRef)
 
 	for _, imgs := range s.podImages {
-		if imgs[imageRef] {
+		if _, ok := imgs[imageRef]; ok {
 			s.images[imageRef] = &ImageInfo{
 				Ref:       imageRef,
 				Digest:    digest,
@@ -107,7 +103,7 @@ func (s *Store) RemovePod(podRef string) {
 // Must be called with the lock held.
 func (s *Store) isImageUsed(imageRef string) bool {
 	for _, imgs := range s.podImages {
-		if imgs[imageRef] {
+		if _, ok := imgs[imageRef]; ok {
 			return true
 		}
 	}

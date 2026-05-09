@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"log/slog"
@@ -13,21 +14,32 @@ import (
 
 	"github.com/PixiBixi/kubearch/internal/inspector"
 	"github.com/PixiBixi/kubearch/internal/store"
+	"github.com/PixiBixi/kubearch/internal/types"
 )
 
-const maxConcurrentInspections = 10
+const (
+	maxConcurrentInspections = 10
+	// shortDigestLen is "sha256:" (7 chars) + 12 hex chars — enough to identify a digest in logs.
+	shortDigestLen = 19
+)
+
+// Inspector inspects a container image and returns its digest and supported platforms.
+// Implementations must be safe for concurrent use.
+type Inspector interface {
+	Inspect(ctx context.Context, imageRef string, auth inspector.PodAuth) (string, []types.Platform, error)
+}
 
 // Watcher watches Kubernetes pod events and triggers image inspections for new images.
 type Watcher struct {
 	client    kubernetes.Interface
 	namespace string
 	store     *store.Store
-	inspector *inspector.Inspector
+	inspector Inspector
 	logger    *slog.Logger
 	sem       chan struct{} // limits concurrent registry fetches
 }
 
-func New(client kubernetes.Interface, namespace string, s *store.Store, insp *inspector.Inspector, logger *slog.Logger) *Watcher {
+func New(client kubernetes.Interface, namespace string, s *store.Store, insp Inspector, logger *slog.Logger) *Watcher {
 	return &Watcher{
 		client:    client,
 		namespace: namespace,
@@ -39,7 +51,9 @@ func New(client kubernetes.Interface, namespace string, s *store.Store, insp *in
 }
 
 // Run starts the pod informer and blocks until ctx is cancelled.
-func (w *Watcher) Run(ctx context.Context) {
+// It returns an error if the informer cannot be initialised (handler registration
+// or cache sync failure). A nil return means the context was cancelled normally.
+func (w *Watcher) Run(ctx context.Context) error {
 	factory := informers.NewSharedInformerFactoryWithOptions(
 		w.client, 0, // no periodic resync — we rely on watch events
 		informers.WithNamespace(w.namespace),
@@ -60,13 +74,13 @@ func (w *Watcher) Run(ctx context.Context) {
 		},
 	}); err != nil {
 		w.logger.Error("failed to register pod event handler", "err", err)
-		return
+		return fmt.Errorf("register pod event handler: %w", err)
 	}
 
 	factory.Start(ctx.Done())
 	if !cache.WaitForCacheSync(ctx.Done(), podInformer.HasSynced) {
 		w.logger.Error("timed out waiting for cache sync")
-		return
+		return errors.New("timed out waiting for pod cache sync")
 	}
 
 	ns := w.namespace
@@ -75,6 +89,7 @@ func (w *Watcher) Run(ctx context.Context) {
 	}
 	w.logger.Info("cache synced, watching pods", "namespace", ns)
 	<-ctx.Done()
+	return nil
 }
 
 func (w *Watcher) onAdd(ctx context.Context, pod *corev1.Pod) {
@@ -137,12 +152,15 @@ func toPod(obj any) (*corev1.Pod, bool) {
 // Go 1.23: returns iter.Seq[string] for use with range.
 func uniqueImages(pod *corev1.Pod) iter.Seq[string] {
 	return func(yield func(string) bool) {
-		seen := make(map[string]bool)
+		seen := make(map[string]struct{})
 		for img := range containerImages(pod) {
-			if img == "" || seen[img] {
+			if img == "" {
 				continue
 			}
-			seen[img] = true
+			if _, ok := seen[img]; ok {
+				continue
+			}
+			seen[img] = struct{}{}
 			if !yield(img) {
 				return
 			}
@@ -180,10 +198,10 @@ func pullSecretNames(pod *corev1.Pod) []string {
 	return names
 }
 
-// shortDigest returns the first 19 characters of a digest (algo + 12 chars of hash).
+// shortDigest returns the first shortDigestLen characters of a digest for log display.
 func shortDigest(digest string) string {
-	if len(digest) > 19 {
-		return digest[:19]
+	if len(digest) > shortDigestLen {
+		return digest[:shortDigestLen]
 	}
 	return digest
 }

@@ -1,3 +1,4 @@
 kubearch
 kubearch-*
 dist/
+.desloppify/
