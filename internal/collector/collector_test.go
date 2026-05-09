@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -143,6 +144,26 @@ func TestCollect_SingleArchMultiArchValue(t *testing.T) {
 	if multiArchValue != 0.0 {
 		t.Errorf("kubearch_image_multi_arch for single-arch image = %v, want 0.0", multiArchValue)
 	}
+}
+
+func TestCollect_ConcurrentCalls(t *testing.T) {
+	s := populatedStore(t)
+	c := New(s)
+
+	const goroutines = 10
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+			ch := make(chan prometheus.Metric, 20)
+			c.Collect(ch)
+			close(ch)
+			for range ch {
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestCollect_PlatformCountValue(t *testing.T) {

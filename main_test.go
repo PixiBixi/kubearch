@@ -67,3 +67,12 @@ func TestBuildK8sClient_WithContext(t *testing.T) {
 		t.Error("expected non-nil client")
 	}
 }
+
+func TestBuildK8sClient_InvalidContext(t *testing.T) {
+	path := minimalKubeconfig(t, "test-ctx")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	_, err := buildK8sClient(path, "nonexistent-context", logger)
+	if err == nil {
+		t.Error("expected error for context not found in kubeconfig")
+	}
+}

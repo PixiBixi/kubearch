@@ -149,6 +149,31 @@ func TestOnAdd_InspectionFailureDoesNotStore(t *testing.T) {
 	}
 }
 
+func TestOnDelete_RemovesPodFromStore(t *testing.T) {
+	s := store.New()
+	w := newTestWatcher(s, &fakeInspector{
+		fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+			return "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+		},
+	})
+
+	pod := makePod("default", "pod1", "nginx:latest")
+
+	// Seed the store directly so we can verify removal.
+	s.TrackPodImage("default/pod1", "nginx:latest")
+	s.SetImage("nginx:latest", "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}})
+
+	if n := len(s.Snapshot()); n != 1 {
+		t.Fatalf("expected 1 image before deletion, got %d", n)
+	}
+
+	w.onDelete(pod)
+
+	if n := len(s.Snapshot()); n != 0 {
+		t.Errorf("expected 0 images after pod deletion, got %d", n)
+	}
+}
+
 func TestOnAdd_SemaphoreLimitsConcurrency(t *testing.T) {
 	s := store.New()
 
