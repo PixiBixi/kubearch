@@ -6,8 +6,8 @@ require (
 	github.com/google/go-containerregistry v0.21.7
 	github.com/google/go-containerregistry/pkg/authn/kubernetes v0.0.0-20260624172245-e8b2b9e51df6
 	github.com/prometheus/client_golang v1.23.2
-	k8s.io/api v0.36.2
-	k8s.io/apimachinery v0.36.2
+	k8s.io/api v0.36.3
+	k8s.io/apimachinery v0.36.3
 	k8s.io/client-go v0.36.2
 )
 
@@ -64,6 +64,6 @@ require (
 	k8s.io/utils v0.0.0-20260210185600-b8788abfbbc2 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
-	sigs.k8s.io/structured-merge-diff/v6 v6.3.2 // indirect
+	sigs.k8s.io/structured-merge-diff/v6 v6.3.3 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
