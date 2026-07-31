@@ -11,10 +11,9 @@ build-all:
 	GOOS=darwin GOARCH=amd64 go build -o kubearch-darwin-amd64 .
 	GOOS=darwin GOARCH=arm64 go build -o kubearch-darwin-arm64 .
 
-# Run linters
+# Run linters (config: .golangci.yml)
 lint:
-	go vet ./...
-	staticcheck ./...
+	golangci-lint run ./...
 
 # Run tests
 test:
