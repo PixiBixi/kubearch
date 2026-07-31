@@ -46,18 +46,16 @@ kos:
 
 archives:
   - id: default
-    format: tar.gz
+    formats: [tar.gz]
     name_template: >-
       {{ .ProjectName }}_
       {{- .Version }}_
       {{- title .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
       {{- else }}{{ .Arch }}{{ end }}
-    format_overrides: []
     files:
       - README.md
       - LICENSE*
-      - deploy/*.yaml
 
 checksum:
   name_template: 'checksums.txt'
