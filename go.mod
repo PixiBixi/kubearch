@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/google/go-containerregistry v0.21.7
-	github.com/google/go-containerregistry/pkg/authn/kubernetes v0.0.0-20260731000824-ec2e58687793
+	github.com/google/go-containerregistry/pkg/authn/kubernetes v0.0.0-20260731170845-2ea098f4b134
 	github.com/prometheus/client_golang v1.24.1
 	k8s.io/api v0.36.3
 	k8s.io/apimachinery v0.36.3
