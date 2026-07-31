@@ -2,6 +2,7 @@ name: Release
 
 on:
   push:
+    branches: [main]
     tags:
       - 'v*'
 
@@ -13,16 +14,35 @@ jobs:
   goreleaser:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - name: Compute next version
+        id: tag
+        if: github.ref_type == 'branch'
+        uses: mathieudutour/github-tag-action@a22cf08638b34d5badda920f9daf6e72c477b07b # v6.2
         with:
-          go-version: stable
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          release_branches: main
+          default_bump: false
+
+      - name: Fetch tags
+        if: github.ref_type == 'tag' || steps.tag.outputs.new_tag != ''
+        run: git fetch --tags --force
+
+      - name: Set up Go
+        if: github.ref_type == 'tag' || steps.tag.outputs.new_tag != ''
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false # release publishes artifacts; avoid cache-poisoning vector
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+        if: github.ref_type == 'tag' || steps.tag.outputs.new_tag != ''
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
           version: '~> v2'
@@ -31,11 +51,19 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push Helm chart to OCI
+        if: github.ref_type == 'tag' || steps.tag.outputs.new_tag != ''
+        env:
+          # On a tag push the ref is the tag itself; on a main push it is the
+          # tag github-tag-action just created.
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || steps.tag.outputs.new_tag }}
+          GHCR_USER: ${{ github.repository_owner }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          CHART_VERSION="${GITHUB_REF_NAME#v}"
-          helm registry login ghcr.io \
-            --username "${{ github.repository_owner }}" \
-            --password "${{ secrets.GITHUB_TOKEN }}"
+          set -euo pipefail
+          CHART_VERSION="${RELEASE_TAG#v}"
+          printf '%s' "$GHCR_TOKEN" | helm registry login ghcr.io \
+            --username "$GHCR_USER" \
+            --password-stdin
           helm package charts/kubearch \
             --version "$CHART_VERSION" \
             --app-version "$CHART_VERSION"
