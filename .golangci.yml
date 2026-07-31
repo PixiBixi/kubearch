@@ -1,0 +1,39 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard # govet, staticcheck, errcheck, ineffassign, unused
+  enable:
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - durationcheck
+    - errorlint
+    - forcetypeassert
+    - gosec
+    - misspell
+    - modernize
+    - nilerr
+    - perfsprint
+    - revive
+    - unconvert
+    - usestdlibvars
+  settings:
+    revive:
+      rules:
+        # Style-only rules, not worth the churn on a small single-binary exporter.
+        - name: package-comments
+          disabled: true
+        - name: exported
+          disabled: true
+        - name: unused-parameter
+          disabled: true
+  exclusions:
+    rules:
+      # gosec on tests is noisy (file perms, hardcoded credentials in fixtures)
+      # and not a runtime concern.
+      - path: _test\.go
+        linters:
+          - gosec
