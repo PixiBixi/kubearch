@@ -34,8 +34,38 @@ func (f *fakeInspector) Inspect(ctx context.Context, imageRef string, auth inspe
 	return fn(ctx, imageRef, auth)
 }
 
+// fakeMetrics records calls instead of exporting them, so tests can assert on
+// what the watcher reports without pulling in the collector package.
+type fakeMetrics struct {
+	mu          sync.Mutex
+	inspections []string // recorded results, in call order
+	retries     int
+}
+
+func (f *fakeMetrics) ObserveInspection(result string, _ time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inspections = append(f.inspections, result)
+}
+
+func (f *fakeMetrics) ObserveRetry() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.retries++
+}
+
+func (f *fakeMetrics) snapshot() (inspections []string, retries int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.inspections), f.retries
+}
+
 func newTestWatcher(s *store.Store, insp Inspector) *Watcher {
-	w := New(k8sfake.NewClientset(), "default", s, insp, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return newTestWatcherWithMetrics(s, insp, nil)
+}
+
+func newTestWatcherWithMetrics(s *store.Store, insp Inspector, metrics Metrics) *Watcher {
+	w := New(k8sfake.NewClientset(), "default", s, insp, slog.New(slog.NewTextHandler(io.Discard, nil)), metrics)
 	// Keep the backoff curve, compress it: retry behaviour is what we assert on,
 	// not the wall-clock delay.
 	w.queue = workqueue.NewTypedRateLimitingQueue(
@@ -179,6 +209,58 @@ func TestInspect_RetriesUntilSuccess(t *testing.T) {
 	defer mu.Unlock()
 	if calls != 3 {
 		t.Errorf("expected 3 attempts, got %d", calls)
+	}
+}
+
+func TestInspect_ReportsSuccessMetric(t *testing.T) {
+	s := store.New()
+	metrics := &fakeMetrics{}
+	w := newTestWatcherWithMetrics(s, &fakeInspector{
+		fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+			return "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+		},
+	}, metrics)
+	startWorkers(t, w)
+
+	w.onPod(makePod("default", "pod1", "nginx:latest"))
+	waitFor(t, "the inspection to succeed", func() bool { return len(s.Snapshot()) == 1 })
+
+	inspections, retries := metrics.snapshot()
+	if !slices.Equal(inspections, []string{"success"}) {
+		t.Errorf("recorded inspections = %v, want [success]", inspections)
+	}
+	if retries != 0 {
+		t.Errorf("recorded retries = %d, want 0", retries)
+	}
+}
+
+func TestInspect_ReportsFailureAndRetryMetrics(t *testing.T) {
+	s := store.New()
+	metrics := &fakeMetrics{}
+	w := newTestWatcherWithMetrics(s, &fakeInspector{
+		fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+			return "", nil, errors.New("registry unavailable")
+		},
+	}, metrics)
+	startWorkers(t, w)
+
+	w.onPod(makePod("default", "pod1", "broken:image"))
+
+	waitFor(t, "retries to be exhausted", func() bool {
+		inspections, _ := metrics.snapshot()
+		return len(inspections) == maxAttempts
+	})
+
+	inspections, retries := metrics.snapshot()
+	for _, result := range inspections {
+		if result != "failure" {
+			t.Errorf("recorded inspections = %v, want all \"failure\"", inspections)
+			break
+		}
+	}
+	// Every attempt but the last (which gives up instead) is followed by a retry.
+	if want := maxAttempts - 1; retries != want {
+		t.Errorf("recorded retries = %d, want %d", retries, want)
 	}
 }
 

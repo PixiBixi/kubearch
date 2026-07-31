@@ -166,6 +166,58 @@ func TestCollect_ConcurrentCalls(t *testing.T) {
 	wg.Wait()
 }
 
+func TestCollect_DigestLabel_PresentByDefault(t *testing.T) {
+	s := store.New()
+	s.SetPodImages("ns/pod1", []string{"nginx:latest"})
+	s.SetImage("nginx:latest", "sha256:aaa", []types.Platform{{OS: "linux", Arch: "amd64"}})
+
+	reg := prometheus.NewRegistry()
+	if err := reg.Register(New(s)); err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather failed: %v", err)
+	}
+
+	for _, mf := range mfs {
+		if mf.GetName() != "kubearch_image_platform_count" {
+			continue
+		}
+		for _, l := range mf.GetMetric()[0].GetLabel() {
+			if l.GetName() == "digest" {
+				return
+			}
+		}
+		t.Fatal("digest label missing from kubearch_image_platform_count with default options")
+	}
+}
+
+func TestCollect_DigestLabel_OmittedWhenDisabled(t *testing.T) {
+	s := store.New()
+	s.SetPodImages("ns/pod1", []string{"nginx:latest"})
+	s.SetImage("nginx:latest", "sha256:aaa", []types.Platform{{OS: "linux", Arch: "amd64"}})
+
+	reg := prometheus.NewRegistry()
+	if err := reg.Register(New(s, WithDigestLabel(false))); err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather failed: %v", err)
+	}
+
+	for _, mf := range mfs {
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "digest" {
+					t.Fatalf("digest label present on %s with WithDigestLabel(false)", mf.GetName())
+				}
+			}
+		}
+	}
+}
+
 func TestCollect_PlatformCountValue(t *testing.T) {
 	s := store.New()
 	s.SetPodImages("ns/pod1", []string{"img:1"})
