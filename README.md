@@ -200,18 +200,21 @@ make snapshot
 │   ├── watcher/watcher.go          # Kubernetes pod informer
 │   └── collector/collector.go      # prometheus.Collector implementation
 ├── charts/kubearch/                # Helm chart
-├── Dockerfile                      # multi-stage build (local dev)
-└── Dockerfile.release              # slim image used by GoReleaser
+└── Dockerfile                      # multi-stage build (local dev only;
+                                    # the published image is built by ko)
 ```
 
 ## Release
 
-Releases are automated via [release-please](https://github.com/googleapis/release-please):
+Releases are cut automatically from [Conventional Commits](https://www.conventionalcommits.org/):
 
-1. Push commits to `main` using [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `perf:`, etc.)
-2. release-please opens a release PR with an updated `CHANGELOG.md` and bumped version
-3. Merge the PR — release-please creates the tag automatically
-4. GoReleaser triggers and builds multi-arch binaries, Docker images (ghcr.io), and pushes the Helm chart to OCI
+1. Push (or merge) commits to `main` — `feat:` bumps the minor, `fix:`/`perf:` the patch, `chore:`/`docs:`/`ci:` release nothing
+2. The `Release` workflow computes the next `vX.Y.Z` and creates the tag
+3. In the same run, GoReleaser publishes the binaries and the multi-arch image to `ghcr.io/PixiBixi/kubearch`, then the Helm chart is pushed to `oci://ghcr.io/pixibixi/kubearch/charts`
+
+Pushing a `v*` tag by hand still triggers the same release path.
+
+Dependency updates are handled by Renovate: minor/patch/digest PRs automerge once CI is green, and Go module bumps land as `feat(deps)`/`fix(deps)` so they ship in a release of their own.
 
 ## License
 

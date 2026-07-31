@@ -18,11 +18,16 @@ make test           # go test -race ./...
 go test -run TestFoo ./internal/store/   # single test / single package
 
 # Lint
-make lint           # go vet + staticcheck
+make lint           # golangci-lint run ./... (config: .golangci.yml)
 
 # Docker
 make docker         # local image (multi-stage Dockerfile)
 make snapshot       # GoReleaser dry-run (requires goreleaser CLI)
+
+# Release: automatic on push to main (conventional commits drive the bump).
+# feat: -> minor, fix: -> patch. Manual tag still works as an escape hatch:
+git tag -a vX.Y.Z -m "..."
+git push origin vX.Y.Z
 ```
 
 Pre-commit hooks run `go fmt`, `go vet`, `go mod tidy`, `go build`, and `staticcheck` automatically. Install once with `pre-commit install`.
@@ -52,6 +57,21 @@ watcher → store ← collector → Prometheus /metrics
 - **Orphan cleanup**: `store.SetImage` checks that at least one pod still references the image before storing (handles race between inspection and pod deletion).
 - **Go version**: requires Go 1.26. The code uses `maps.Values` (1.23), `iter.Seq` (1.23), and per-iteration loop variable scoping (1.22).
 
+## CI
+
+All workflows live in `.github/workflows/`, actions are pinned by SHA:
+
+- **CI** (`ci.yml`): `go mod verify`, build, `go test -race`
+- **Lint** (`lint.yml`): golangci-lint v2.12.2 against `.golangci.yml`
+- **github-actions** (`github-actions.yml`): zizmor audit of the workflows, SARIF to code scanning
+- **govulncheck** (`govulncheck.yml`): reachable vulnerabilities in dependencies
+- **Go format** / **markdownlint**: reviewdog inline suggestions on PRs
+- **Release** (`release.yml`): see below
+
 ## Release
 
-GoReleaser (`goreleaser.yml`) builds `linux/amd64` and `linux/arm64` binaries and Docker images, pushes multi-arch manifests to `ghcr.io/PixiBixi/kubearch`. Version/commit/date are injected via ldflags into `main.version`, `main.commit`, `main.date`.
+Automatic on push to `main` — `mathieudutour/github-tag-action` computes the next `vX.Y.Z` from conventional commits (`default_bump: false`, so a chore-only push releases nothing) and tags, then GoReleaser and the Helm chart push run in the same job. Manual `v*` tag push still works.
+
+Renovate drives dependency releases: gomod minor → `feat(deps)` (minor), patch/digest → `fix(deps)` (patch), github-actions and dockerfile → `chore(deps)` (no release). Minor/patch/digest PRs automerge once CI is green.
+
+GoReleaser (`.goreleaser.yml`) builds `linux/amd64` and `linux/arm64` binaries and, via ko, pushes multi-arch images to `ghcr.io/PixiBixi/kubearch`; the Helm chart goes to `ghcr.io/pixibixi/kubearch/charts`. Version/commit/date are injected via ldflags into `main.version`, `main.commit`, `main.date`.
