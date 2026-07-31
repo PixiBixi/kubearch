@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -32,16 +33,11 @@ func TestBuildK8sClient_InvalidPath(t *testing.T) {
 func minimalKubeconfig(t *testing.T, contextName string) string {
 	t.Helper()
 	content := "apiVersion: v1\nkind: Config\nclusters:\n- name: fake\n  cluster:\n    server: https://localhost:0\ncurrent-context: " + contextName + "\ncontexts:\n- name: " + contextName + "\n  context:\n    cluster: fake\n    user: fake\nusers:\n- name: fake\n  user: {}\n"
-	f, err := os.CreateTemp("", "kubeconfig-*.yaml")
-	if err != nil {
-		t.Fatalf("create temp kubeconfig: %v", err)
-	}
-	t.Cleanup(func() { os.Remove(f.Name()) })
-	if _, err := f.WriteString(content); err != nil {
+	path := filepath.Join(t.TempDir(), "kubeconfig.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write temp kubeconfig: %v", err)
 	}
-	f.Close()
-	return f.Name()
+	return path
 }
 
 func TestBuildK8sClient_ValidKubeconfig(t *testing.T) {

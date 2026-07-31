@@ -2,7 +2,6 @@ package inspector
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http/httptest"
 	"os"
@@ -80,7 +79,7 @@ func TestInspect_MultiArch(t *testing.T) {
 		},
 	)
 
-	imageRef := fmt.Sprintf("%s/test/multi:latest", host)
+	imageRef := host + "/test/multi:latest"
 	ref, err := name.ParseReference(imageRef, name.Insecure)
 	if err != nil {
 		t.Fatalf("ParseReference: %v", err)
@@ -131,7 +130,7 @@ func TestInspect_SingleArch(t *testing.T) {
 		t.Fatalf("mutate.ConfigFile: %v", err)
 	}
 
-	imageRef := fmt.Sprintf("%s/test/single:latest", host)
+	imageRef := host + "/test/single:latest"
 	ref, err := name.ParseReference(imageRef, name.Insecure)
 	if err != nil {
 		t.Fatalf("ParseReference: %v", err)
