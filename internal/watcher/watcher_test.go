@@ -160,7 +160,7 @@ func TestOnDelete_RemovesPodFromStore(t *testing.T) {
 	pod := makePod("default", "pod1", "nginx:latest")
 
 	// Seed the store directly so we can verify removal.
-	s.TrackPodImage("default/pod1", "nginx:latest")
+	s.SetPodImages("default/pod1", []string{"nginx:latest"})
 	s.SetImage("nginx:latest", "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}})
 
 	if n := len(s.Snapshot()); n != 1 {

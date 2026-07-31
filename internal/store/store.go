@@ -15,11 +15,17 @@ type ImageInfo struct {
 }
 
 // Store is a thread-safe registry of image → platforms, with pod reference counting.
+//
+// podImages and imagePods are two views of the same pod↔image relation. The
+// reverse index is what keeps every operation independent of cluster size: a
+// pod delete or an inspection result touches only the images of that pod,
+// never the full pod set.
 type Store struct {
 	mu        sync.RWMutex
 	images    map[string]*ImageInfo          // imageRef → info (inspection done)
 	pending   map[string]struct{}            // imageRef → inspection in progress
 	podImages map[string]map[string]struct{} // podRef → set of imageRefs
+	imagePods map[string]map[string]struct{} // imageRef → set of podRefs
 }
 
 func New() *Store {
@@ -27,29 +33,51 @@ func New() *Store {
 		images:    make(map[string]*ImageInfo),
 		pending:   make(map[string]struct{}),
 		podImages: make(map[string]map[string]struct{}),
+		imagePods: make(map[string]map[string]struct{}),
 	}
 }
 
-// TrackPodImage registers that podRef uses imageRef.
-// Returns true if the image requires inspection (unknown and not pending).
-func (s *Store) TrackPodImage(podRef, imageRef string) bool {
+// SetPodImages replaces the image set of podRef with imageRefs and returns the
+// refs that require inspection (neither known nor already in flight). Images the
+// pod no longer references are unlinked, and dropped entirely once no pod uses
+// them — which is what makes this safe to call on pod updates, not just adds.
+func (s *Store) SetPodImages(podRef string, imageRefs []string) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.podImages[podRef] == nil {
-		s.podImages[podRef] = make(map[string]struct{})
-	}
-	s.podImages[podRef][imageRef] = struct{}{}
+	current := s.podImages[podRef]
+	next := make(map[string]struct{}, len(imageRefs))
+	var toInspect []string
 
-	if _, known := s.images[imageRef]; known {
-		return false
-	}
-	if _, pending := s.pending[imageRef]; pending {
-		return false
+	for _, imageRef := range imageRefs {
+		if _, dup := next[imageRef]; dup {
+			continue
+		}
+		next[imageRef] = struct{}{}
+
+		if s.imagePods[imageRef] == nil {
+			s.imagePods[imageRef] = make(map[string]struct{})
+		}
+		s.imagePods[imageRef][podRef] = struct{}{}
+
+		if _, known := s.images[imageRef]; known {
+			continue
+		}
+		if _, inFlight := s.pending[imageRef]; inFlight {
+			continue
+		}
+		s.pending[imageRef] = struct{}{}
+		toInspect = append(toInspect, imageRef)
 	}
 
-	s.pending[imageRef] = struct{}{}
-	return true
+	for imageRef := range current {
+		if _, still := next[imageRef]; !still {
+			s.unlink(podRef, imageRef)
+		}
+	}
+	s.podImages[podRef] = next
+
+	return toInspect
 }
 
 // SetImage stores the inspection result.
@@ -60,17 +88,14 @@ func (s *Store) SetImage(imageRef, digest string, platforms []types.Platform) {
 
 	delete(s.pending, imageRef)
 
-	for _, imgs := range s.podImages {
-		if _, ok := imgs[imageRef]; ok {
-			s.images[imageRef] = &ImageInfo{
-				Ref:       imageRef,
-				Digest:    digest,
-				Platforms: platforms,
-			}
-			return
-		}
+	if len(s.imagePods[imageRef]) == 0 {
+		return // no pod uses this image anymore; discard result
 	}
-	// No pod uses this image anymore; discard result.
+	s.images[imageRef] = &ImageInfo{
+		Ref:       imageRef,
+		Digest:    digest,
+		Platforms: platforms,
+	}
 }
 
 // FailImage removes imageRef from pending after a failed inspection,
@@ -93,21 +118,22 @@ func (s *Store) RemovePod(podRef string) {
 	delete(s.podImages, podRef)
 
 	for imageRef := range imageRefs {
-		if !s.isImageUsed(imageRef) {
-			delete(s.images, imageRef)
-		}
+		s.unlink(podRef, imageRef)
 	}
 }
 
-// isImageUsed reports whether any pod still references imageRef.
-// Must be called with the lock held.
-func (s *Store) isImageUsed(imageRef string) bool {
-	for _, imgs := range s.podImages {
-		if _, ok := imgs[imageRef]; ok {
-			return true
-		}
+// unlink drops the podRef→imageRef edge and forgets the image once it is
+// orphaned. Must be called with the write lock held.
+func (s *Store) unlink(podRef, imageRef string) {
+	pods := s.imagePods[imageRef]
+	delete(pods, podRef)
+	if len(pods) > 0 {
+		return
 	}
-	return false
+	delete(s.imagePods, imageRef)
+	delete(s.images, imageRef)
+	// pending is deliberately left alone: an in-flight inspection still owns
+	// that slot and clears it via SetImage/FailImage.
 }
 
 // Snapshot returns a point-in-time copy of all known images.
@@ -121,4 +147,11 @@ func (s *Store) Snapshot() []ImageInfo {
 		result = append(result, *info)
 	}
 	return result
+}
+
+// Stats reports the current store size, for self-monitoring metrics.
+func (s *Store) Stats() (images, pending, pods int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.images), len(s.pending), len(s.podImages)
 }

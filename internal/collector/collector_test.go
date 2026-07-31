@@ -13,12 +13,12 @@ import (
 func populatedStore(t *testing.T) *store.Store {
 	t.Helper()
 	s := store.New()
-	s.TrackPodImage("ns/pod1", "nginx:latest")
+	s.SetPodImages("ns/pod1", []string{"nginx:latest"})
 	s.SetImage("nginx:latest", "sha256:aaa", []types.Platform{
 		{OS: "linux", Arch: "amd64"},
 		{OS: "linux", Arch: "arm64"},
 	})
-	s.TrackPodImage("ns/pod2", "redis:7")
+	s.SetPodImages("ns/pod2", []string{"redis:7"})
 	s.SetImage("redis:7", "sha256:bbb", []types.Platform{
 		{OS: "linux", Arch: "amd64"},
 	})
@@ -86,7 +86,7 @@ func TestCollect_EmptyStore(t *testing.T) {
 
 func TestCollect_MultiArchValue(t *testing.T) {
 	s := store.New()
-	s.TrackPodImage("ns/pod1", "multi:latest")
+	s.SetPodImages("ns/pod1", []string{"multi:latest"})
 	s.SetImage("multi:latest", "sha256:ccc", []types.Platform{
 		{OS: "linux", Arch: "amd64"},
 		{OS: "linux", Arch: "arm64"},
@@ -118,7 +118,7 @@ func TestCollect_MultiArchValue(t *testing.T) {
 
 func TestCollect_SingleArchMultiArchValue(t *testing.T) {
 	s := store.New()
-	s.TrackPodImage("ns/pod1", "single:latest")
+	s.SetPodImages("ns/pod1", []string{"single:latest"})
 	s.SetImage("single:latest", "sha256:ddd", []types.Platform{
 		{OS: "linux", Arch: "amd64"},
 	})
@@ -168,7 +168,7 @@ func TestCollect_ConcurrentCalls(t *testing.T) {
 
 func TestCollect_PlatformCountValue(t *testing.T) {
 	s := store.New()
-	s.TrackPodImage("ns/pod1", "img:1")
+	s.SetPodImages("ns/pod1", []string{"img:1"})
 	s.SetImage("img:1", "sha256:eee", []types.Platform{
 		{OS: "linux", Arch: "amd64"},
 		{OS: "linux", Arch: "arm64"},

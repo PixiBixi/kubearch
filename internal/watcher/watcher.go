@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
@@ -100,11 +101,7 @@ func (w *Watcher) onAdd(ctx context.Context, pod *corev1.Pod) {
 		ImagePullSecrets:   pullSecretNames(pod),
 	}
 
-	for imageRef := range uniqueImages(pod) {
-		if !w.store.TrackPodImage(podRef, imageRef) {
-			continue // already known or inspection in progress
-		}
-
+	for _, imageRef := range w.store.SetPodImages(podRef, slices.Collect(uniqueImages(pod))) {
 		w.logger.Info("new image detected, queuing inspection", "image", imageRef, "pod", podRef)
 
 		// Go 1.22+: loop variable is scoped per iteration, no explicit capture needed.
