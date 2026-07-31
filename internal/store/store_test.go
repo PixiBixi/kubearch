@@ -191,11 +191,12 @@ func TestConcurrentAccess(t *testing.T) {
 			podRef := "ns/pod"
 			imageRef := "nginx:latest"
 
-			if i%3 == 0 {
+			switch i % 3 {
+			case 0:
 				s.TrackPodImage(podRef, imageRef)
-			} else if i%3 == 1 {
+			case 1:
 				s.SetImage(imageRef, "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}})
-			} else {
+			default:
 				s.Snapshot()
 			}
 		}(i)

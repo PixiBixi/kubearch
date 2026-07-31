@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -82,7 +83,13 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	srv := &http.Server{Addr: *addr, Handler: mux}
+	srv := &http.Server{
+		Addr:    *addr,
+		Handler: mux,
+		// Bound the header read phase: a scrape endpoint has no reason to keep
+		// a half-open connection alive (Slowloris).
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	go func() {
 		<-ctx.Done()
 		if err := srv.Shutdown(context.Background()); err != nil {
