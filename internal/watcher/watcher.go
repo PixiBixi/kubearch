@@ -44,6 +44,25 @@ type Inspector interface {
 	Inspect(ctx context.Context, imageRef string, auth inspector.PodAuth) (string, []types.Platform, error)
 }
 
+// Metrics receives inspection outcomes for self-monitoring. It is an
+// interface, not a *collector.SelfMetrics field, so this package does not
+// have to import collector (which already imports store, same as this
+// package — a direct dependency back from here would cycle).
+type Metrics interface {
+	// ObserveInspection records the outcome and duration of one inspection attempt.
+	ObserveInspection(result string, d time.Duration)
+	// ObserveRetry records that a failed inspection is being requeued.
+	ObserveRetry()
+}
+
+// noopMetrics is used when New is called without a Metrics implementation,
+// so tests and callers that don't care about self-monitoring aren't forced to
+// provide one.
+type noopMetrics struct{}
+
+func (noopMetrics) ObserveInspection(string, time.Duration) {}
+func (noopMetrics) ObserveRetry()                           {}
+
 // Watcher watches Kubernetes pod events and triggers image inspections for new images.
 type Watcher struct {
 	client    kubernetes.Interface
@@ -52,6 +71,7 @@ type Watcher struct {
 	inspector Inspector
 	logger    *slog.Logger
 	workers   int
+	metrics   Metrics
 
 	// queue dedupes images, rate-limits retries and bounds the backlog.
 	queue workqueue.TypedRateLimitingInterface[string]
@@ -63,7 +83,13 @@ type Watcher struct {
 	authByImage map[string]inspector.PodAuth
 }
 
-func New(client kubernetes.Interface, namespace string, s *store.Store, insp Inspector, logger *slog.Logger) *Watcher {
+// New builds a Watcher. metrics may be nil, in which case inspection
+// outcomes are silently dropped instead of forcing every caller (tests
+// included) to supply a Metrics implementation.
+func New(client kubernetes.Interface, namespace string, s *store.Store, insp Inspector, logger *slog.Logger, metrics Metrics) *Watcher {
+	if metrics == nil {
+		metrics = noopMetrics{}
+	}
 	return &Watcher{
 		client:    client,
 		namespace: namespace,
@@ -71,12 +97,19 @@ func New(client kubernetes.Interface, namespace string, s *store.Store, insp Ins
 		inspector: insp,
 		logger:    logger,
 		workers:   defaultWorkers,
+		metrics:   metrics,
 		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
 			workqueue.NewTypedItemExponentialFailureRateLimiter[string](baseRetryDelay, maxRetryDelay),
 			workqueue.TypedRateLimitingQueueConfig[string]{Name: "images"},
 		),
 		authByImage: make(map[string]inspector.PodAuth),
 	}
+}
+
+// QueueDepth reports the number of images currently waiting in the work
+// queue, for self-monitoring.
+func (w *Watcher) QueueDepth() int {
+	return w.queue.Len()
 }
 
 // Run starts the pod informer and blocks until ctx is cancelled.
@@ -185,6 +218,7 @@ func (w *Watcher) processNext(ctx context.Context) bool {
 	default:
 		w.logger.Warn("inspection failed, retrying",
 			"image", imageRef, "attempt", w.queue.NumRequeues(imageRef)+1, "err", err)
+		w.metrics.ObserveRetry()
 		w.queue.AddRateLimited(imageRef)
 	}
 	return true
@@ -200,10 +234,13 @@ func (w *Watcher) inspect(ctx context.Context, imageRef string) error {
 	ctx, cancel := context.WithTimeout(ctx, inspectTimeout)
 	defer cancel()
 
+	start := time.Now()
 	digest, platforms, err := w.inspector.Inspect(ctx, imageRef, auth)
 	if err != nil {
+		w.metrics.ObserveInspection("failure", time.Since(start))
 		return fmt.Errorf("inspect %q: %w", imageRef, err)
 	}
+	w.metrics.ObserveInspection("success", time.Since(start))
 
 	w.store.SetImage(imageRef, digest, platforms)
 	w.forgetAuth(imageRef)

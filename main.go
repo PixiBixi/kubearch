@@ -37,6 +37,7 @@ func main() {
 		kubeconfig  = flag.String("kubeconfig", "", "Path to kubeconfig file (empty = auto-detect)")
 		kubeContext = flag.String("context", "", "Kubernetes context to use (empty = current context)")
 		showVersion = flag.Bool("version", false, "Print version information and exit")
+		digestLabel = flag.Bool("digest-label", true, "Include the digest label on image metrics (disable to avoid a new time series on every image rebuild of the same tag)")
 	)
 	flag.Parse()
 
@@ -64,10 +65,25 @@ func main() {
 
 	s := store.New()
 	insp := inspector.New(k8sClient, logger)
-	w := watcher.New(k8sClient, *namespace, s, insp, logger)
+
+	// The watcher reports to selfMetrics and selfMetrics reports on the
+	// watcher's queue, so one of the two references has to be late-bound.
+	// QueueDepth is only ever called from a scrape, long after w is assigned;
+	// the nil check is there so a future reordering degrades to a zero reading
+	// instead of crashing the exporter.
+	var w *watcher.Watcher
+	queueDepth := func() int {
+		if w == nil {
+			return 0
+		}
+		return w.QueueDepth()
+	}
+	selfMetrics := collector.NewSelfMetrics(version, commit, s, queueDepth)
+	w = watcher.New(k8sClient, *namespace, s, insp, logger, selfMetrics)
 
 	reg := prometheus.NewRegistry()
-	reg.MustRegister(collector.New(s))
+	reg.MustRegister(collector.New(s, collector.WithDigestLabel(*digestLabel)))
+	reg.MustRegister(selfMetrics)
 
 	go func() {
 		if err := w.Run(ctx); err != nil {
