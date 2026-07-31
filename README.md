@@ -12,19 +12,28 @@ It reads each pod's image references, fetches the OCI manifest list from the reg
 
 ## How it works
 
-```
+```text
 K8s API (pod watch)
       │
       ▼  new image detected
-Registry API (OCI manifest list, HEAD only)
+work queue (10 workers, dedup, retry with backoff)
+      │
+      ▼
+Registry API (OCI manifest, no layers pulled)
       │
       ▼
 Prometheus /metrics
 ```
 
-- Watches pod `Add`/`Delete` events via a shared informer — **no polling**
+- Watches pod `Add`/`Update`/`Delete` events via a shared informer — **no polling**
 - Inspects each image only **once** (in-memory store, invalidated when the last pod using it is deleted)
-- Authenticates via `imagePullSecrets` and service account pull secrets, with anonymous fallback
+- Reads manifests only, never layers. Multi-arch images need one request; single-arch
+  images need a second one for the config blob, which is where the platform is recorded
+- Bounded work: 10 concurrent inspections, a 30 s deadline per attempt, and 5 retries
+  with exponential backoff before an image is dropped
+- Authenticates via `imagePullSecrets` and service account pull secrets, with anonymous
+  fallback. Credentials are cached for 5 min per `(namespace, service account, pull secrets)`
+  and evicted on `401`/`403`, so a rotated secret is picked up on the next attempt
 - Supports public registries (Docker Hub, ghcr.io, gcr.io, ECR, ACR, ...) and private ones
 
 ## Metrics
@@ -35,9 +44,36 @@ Prometheus /metrics
 | `kubearch_image_platform_count` | Gauge | `image`, `digest` | Total number of platforms the image supports. |
 | `kubearch_image_multi_arch` | Gauge | `image`, `digest` | `1` if the image supports more than one platform, `0` otherwise. |
 
+The `digest` label mints a new time series every time an image is rebuilt
+under the same tag, which Prometheus never reclaims on its own. Pass
+`-digest-label=false` to drop it from all three families. Note that it buys
+you nothing if your pod specs already pin images by digest
+(`repo:tag@sha256:…`, as GKE does) — the digest is part of the `image` label
+in that case.
+
+### Self-monitoring metrics
+
+Without these, a total inspection outage — expired credentials, unreachable
+registry — looks exactly like an empty cluster: the image metrics simply
+disappear.
+
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `kubearch_build_info` | Gauge | `version`, `commit`, `go_version` | Always `1`. Build metadata of the running binary. |
+| `kubearch_inspections_total` | Counter | `result` | Inspection attempts, `result` is `success` or `failure`. |
+| `kubearch_inspection_retries_total` | Counter | — | Failed inspections requeued for another attempt. |
+| `kubearch_inspection_duration_seconds` | Histogram | — | Latency of registry calls. |
+| `kubearch_store_images` | Gauge | — | Images with a known result. |
+| `kubearch_store_pending_inspections` | Gauge | — | Inspections in flight. |
+| `kubearch_store_pods` | Gauge | — | Pods currently tracked. |
+| `kubearch_queue_depth` | Gauge | — | Images waiting in the work queue. |
+
+`kubearch_inspections_total` only appears once an inspection has been attempted:
+a Prometheus `CounterVec` exposes nothing until a label value is observed.
+
 ### Example output
 
-```
+```text
 kubearch_image_platform_supported{arch="amd64",digest="sha256:abc…",image="nginx:1.27",os="linux"} 1
 kubearch_image_platform_supported{arch="arm64",digest="sha256:abc…",image="nginx:1.27",os="linux"} 1
 kubearch_image_platform_supported{arch="arm",digest="sha256:abc…",image="nginx:1.27",os="linux"}   1
@@ -64,6 +100,23 @@ sort_desc(kubearch_image_platform_count)
 # (requires joining with kube_pod_container_info from kube-state-metrics)
 kubearch_image_platform_supported * on (image) group_left()
   kube_pod_container_info{namespace="production"}
+```
+
+Watching the exporter itself:
+
+```promql
+# Inspection failure ratio — alert above a few percent
+sum(rate(kubearch_inspections_total{result="failure"}[15m]))
+  / sum(rate(kubearch_inspections_total[15m]))
+
+# Images the exporter never managed to resolve (queue drained, nothing pending)
+kubearch_store_pods > 0 and kubearch_store_images == 0
+
+# Backlog not draining: registry unreachable or rate-limiting us
+kubearch_queue_depth > 0 and rate(kubearch_inspection_retries_total[10m]) > 0
+
+# p99 registry latency
+histogram_quantile(0.99, sum by (le) (rate(kubearch_inspection_duration_seconds_bucket[15m])))
 ```
 
 ## Installation
@@ -109,6 +162,7 @@ Pre-built multi-arch images (`linux/amd64`, `linux/arm64`) are published to `ghc
 | `image.tag` | `""` (chart appVersion) | Image tag |
 | `image.pullPolicy` | `IfNotPresent` | Image pull policy |
 | `watchNamespace` | `""` | Namespace to watch. Empty = all namespaces (ClusterRole). Set = namespace-scoped Role. |
+| `extraArgs` | `[]` | Extra CLI flags for the container, e.g. `["-digest-label=false"]` |
 | `serviceAccount.create` | `true` | Create a dedicated ServiceAccount |
 | `serviceAccount.annotations` | `{}` | Annotations for the ServiceAccount (e.g. Workload Identity) |
 | `rbac.create` | `true` | Create the required Role/ClusterRole and binding |
@@ -130,6 +184,7 @@ Pre-built multi-arch images (`linux/amd64`, `linux/arm64`) are published to `ghc
 | `-namespace` | `""` | Kubernetes namespace to watch (empty = all) |
 | `-kubeconfig` | `""` | Path to kubeconfig file (empty = auto-detect) |
 | `-context` | `""` | Kubernetes context to use (empty = current context) |
+| `-digest-label` | `true` | Include the `digest` label on image metrics. Disable to avoid a new time series per image rebuild. |
 | `-version` | — | Print version and exit |
 
 ## Standalone mode
@@ -154,7 +209,7 @@ kubearch can run outside a cluster against any context in your kubeconfig — us
 
 The startup log tells you which mode is active:
 
-```
+```text
 level=INFO msg="config: in-cluster"
 # or
 level=INFO msg="config: kubeconfig" context=current
@@ -179,8 +234,12 @@ make build
 # Run locally against current kubectl context
 ./kubearch --namespace=default
 
-# Lint
+# Test and lint
+make test
 make lint
+
+# Benchmarks (see PERFORMANCE.md for the recorded numbers)
+go test -run='^$' -bench=. ./internal/store/
 
 # Docker image (local)
 make docker
@@ -191,15 +250,18 @@ make snapshot
 
 ### Project structure
 
-```
+```text
 .
 ├── main.go                         # entry point, flags, wiring
 ├── internal/
 │   ├── store/store.go              # thread-safe image → platforms store
 │   ├── inspector/inspector.go      # OCI manifest inspection (go-containerregistry)
-│   ├── watcher/watcher.go          # Kubernetes pod informer
-│   └── collector/collector.go      # prometheus.Collector implementation
+│   ├── watcher/watcher.go          # pod informer + inspection work queue
+│   └── collector/
+│       ├── collector.go            # image metrics
+│       └── selfmetrics.go          # the exporter's own metrics
 ├── charts/kubearch/                # Helm chart
+├── PERFORMANCE.md                  # measured hot paths, with before/after
 └── Dockerfile                      # multi-stage build (local dev only;
                                     # the published image is built by ko)
 ```

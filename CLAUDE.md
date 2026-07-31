@@ -36,26 +36,28 @@ Pre-commit hooks run `go fmt`, `go vet`, `go mod tidy`, `go build`, and `staticc
 
 Data flows through four packages wired together in `main.go`:
 
+```text
+watcher → workqueue → workers → store ← collector → Prometheus /metrics
+                         ↑                  ↑
+                  inspector (registry)   SelfMetrics
 ```
-watcher → store ← collector → Prometheus /metrics
-            ↑
-         inspector (registry fetch)
-```
 
-- **`internal/store`** — thread-safe in-memory map `imageRef → ImageInfo` with pod reference counting. Key invariant: an image entry is added on first pod Add event and removed when the last pod using it is deleted. A `pending` set prevents duplicate concurrent inspections.
+- **`internal/store`** — thread-safe `imageRef → ImageInfo` map with pod reference counting, kept in two directions: `podImages` (podRef → images) and `imagePods` (image → podRefs). The reverse index is what makes every operation independent of cluster size. Key invariant: an image entry exists while at least one pod references it, and is dropped when the last one goes. A `pending` set prevents duplicate concurrent inspections. `Stats()` feeds the self-monitoring gauges.
 
-- **`internal/inspector`** — fetches OCI manifests via `go-containerregistry`. Resolves auth through `k8schain` (imagePullSecrets + ServiceAccount pull secrets + anonymous fallback). Handles both multi-arch (OCI image index / Docker manifest list) and single-arch images. Only reads manifests — never pulls layers.
+- **`internal/inspector`** — fetches OCI manifests via `go-containerregistry`. Resolves auth through `k8schain` (imagePullSecrets + ServiceAccount pull secrets + anonymous fallback), caching a `remote.Puller` per `(namespace, service account, pull secrets)` for 5 min with `singleflight` on misses and eviction on 401/403. Handles both multi-arch (OCI image index / Docker manifest list) and single-arch images. Only reads manifests — never pulls layers.
 
-- **`internal/watcher`** — Kubernetes shared informer on pods. `AddFunc` triggers image inspection goroutines (bounded to 10 concurrent via semaphore channel). `UpdateFunc` is intentionally omitted (container spec is immutable). `DeleteFunc` calls `store.RemovePod`. Handles `DeletedFinalStateUnknown` for missed delete events.
+- **`internal/watcher`** — Kubernetes shared informer on pods feeding a `client-go` rate-limited workqueue drained by 10 workers. `AddFunc`/`UpdateFunc` call `onPod`, which reconciles the pod's image set; `sameImages` short-circuits the frequent status-only updates. Each attempt runs under a 30 s deadline, failures retry with exponential backoff up to 5 attempts. `DeleteFunc` calls `store.RemovePod` and handles `DeletedFinalStateUnknown`.
 
-- **`internal/collector`** — implements `prometheus.Collector`. On each scrape, calls `store.Snapshot()` and emits three metric families: `kubearch_image_platform_supported`, `kubearch_image_platform_count`, `kubearch_image_multi_arch`.
+- **`internal/collector`** — two `prometheus.Collector` implementations. `Collector` emits the image families (`kubearch_image_platform_supported`, `_platform_count`, `_multi_arch`) from `store.Snapshot()`, with the `digest` label optional via `WithDigestLabel`. `SelfMetrics` emits the exporter's own health: build info, inspection counters/histogram, and scrape-time gauges for store size and queue depth.
 
 ## Key Design Decisions
 
 - **No polling**: relies entirely on informer watch events. The store is a pure in-memory cache; no persistence.
-- **Deduplication**: `store.TrackPodImage` is the single entry point for deciding whether to inspect. It returns `true` only if the image is neither known nor pending.
+- **Deduplication**: `store.SetPodImages` is the single entry point for deciding whether to inspect. It takes the pod's full image set (replace semantics) and returns only the refs that are neither known nor pending.
+- **Pod specs are not immutable**: `kubectl set image` rewrites `spec.containers[*].image` and ephemeral containers appear on running pods, which is why `UpdateFunc` exists.
 - **Orphan cleanup**: `store.SetImage` checks that at least one pod still references the image before storing (handles race between inspection and pod deletion).
-- **Go version**: requires Go 1.26. The code uses `maps.Values` (1.23), `iter.Seq` (1.23), and per-iteration loop variable scoping (1.22).
+- **Bounded everything**: goroutines (worker pool), inspection latency (deadline), retries (max attempts), credential staleness (TTL). See `PERFORMANCE.md` for the measurements behind these choices.
+- **Go version**: requires Go 1.26. The code uses `maps.Values` (1.23), `iter.Seq`/`iter.Pull` (1.23), `WaitGroup.Go` (1.25), and per-iteration loop variable scoping (1.22).
 
 ## CI
 
