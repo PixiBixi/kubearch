@@ -17,6 +17,9 @@ fullnameOverride: ""
 # When set, a namespace-scoped Role is created instead.
 watchNamespace: ""
 
+# Extra CLI flags appended to the container args, e.g. ["-digest-label=false"].
+extraArgs: []
+
 serviceAccount:
   # Create a dedicated ServiceAccount.
   create: true
