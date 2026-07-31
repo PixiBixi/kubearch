@@ -7,11 +7,14 @@ import (
 	"iter"
 	"log/slog"
 	"slices"
+	"sync"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
 
 	"github.com/PixiBixi/kubearch/internal/inspector"
 	"github.com/PixiBixi/kubearch/internal/store"
@@ -19,7 +22,18 @@ import (
 )
 
 const (
-	maxConcurrentInspections = 10
+	// defaultWorkers bounds goroutines and concurrent registry fetches alike:
+	// the queue holds the backlog, so a cluster-wide initial sync no longer
+	// spawns one goroutine per image.
+	defaultWorkers = 10
+	// inspectTimeout bounds a single inspection. Without it, a registry that
+	// accepts the connection but never answers would hold a worker forever.
+	inspectTimeout = 30 * time.Second
+	// maxAttempts before an image is dropped from the queue. With the backoff
+	// below, that spans a bit over two minutes of retries.
+	maxAttempts    = 5
+	baseRetryDelay = 1 * time.Second
+	maxRetryDelay  = 1 * time.Minute
 	// shortDigestLen is "sha256:" (7 chars) + 12 hex chars — enough to identify a digest in logs.
 	shortDigestLen = 19
 )
@@ -37,7 +51,16 @@ type Watcher struct {
 	store     *store.Store
 	inspector Inspector
 	logger    *slog.Logger
-	sem       chan struct{} // limits concurrent registry fetches
+	workers   int
+
+	// queue dedupes images, rate-limits retries and bounds the backlog.
+	queue workqueue.TypedRateLimitingInterface[string]
+
+	// authByImage keeps the pod credentials an image was discovered with, so a
+	// retry does not depend on the originating pod still being around. Entries
+	// live only while the image is queued.
+	authMu      sync.Mutex
+	authByImage map[string]inspector.PodAuth
 }
 
 func New(client kubernetes.Interface, namespace string, s *store.Store, insp Inspector, logger *slog.Logger) *Watcher {
@@ -47,7 +70,12 @@ func New(client kubernetes.Interface, namespace string, s *store.Store, insp Ins
 		store:     s,
 		inspector: insp,
 		logger:    logger,
-		sem:       make(chan struct{}, maxConcurrentInspections),
+		workers:   defaultWorkers,
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[string](baseRetryDelay, maxRetryDelay),
+			workqueue.TypedRateLimitingQueueConfig[string]{Name: "images"},
+		),
+		authByImage: make(map[string]inspector.PodAuth),
 	}
 }
 
@@ -64,10 +92,24 @@ func (w *Watcher) Run(ctx context.Context) error {
 	if _, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			if pod, ok := obj.(*corev1.Pod); ok {
-				w.onAdd(ctx, pod)
+				w.onPod(pod)
 			}
 		},
-		// UpdateFunc intentionally omitted: container spec is immutable in Kubernetes.
+		// A pod spec is not fully immutable: `kubectl set image` rewrites
+		// spec.containers[*].image, and ephemeral containers are added to a
+		// running pod. Status updates are far more frequent than either, so
+		// bail out unless the image set actually changed.
+		UpdateFunc: func(oldObj, newObj any) {
+			oldPod, ok := oldObj.(*corev1.Pod)
+			if !ok {
+				return
+			}
+			newPod, ok := newObj.(*corev1.Pod)
+			if !ok || sameImages(oldPod, newPod) {
+				return
+			}
+			w.onPod(newPod)
+		},
 		DeleteFunc: func(obj any) {
 			if pod, ok := toPod(obj); ok {
 				w.onDelete(pod)
@@ -88,13 +130,95 @@ func (w *Watcher) Run(ctx context.Context) error {
 	if ns == "" {
 		ns = "all"
 	}
-	w.logger.Info("cache synced, watching pods", "namespace", ns)
+	w.logger.Info("cache synced, watching pods", "namespace", ns, "workers", w.workers)
+
+	stopWorkers := w.startWorkers(ctx)
 	<-ctx.Done()
+	stopWorkers()
 	return nil
 }
 
-func (w *Watcher) onAdd(ctx context.Context, pod *corev1.Pod) {
-	podRef := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+// startWorkers launches the inspection workers and returns a function that
+// drains the queue and waits for them to exit.
+func (w *Watcher) startWorkers(ctx context.Context) (stop func()) {
+	var wg sync.WaitGroup
+	for range w.workers {
+		// Go 1.25: WaitGroup.Go pairs Add/Done with the goroutine itself.
+		wg.Go(func() {
+			for w.processNext(ctx) {
+			}
+		})
+	}
+	return func() {
+		w.queue.ShutDown()
+		wg.Wait()
+	}
+}
+
+// processNext handles one queued image. It returns false once the queue is shut down.
+func (w *Watcher) processNext(ctx context.Context) bool {
+	imageRef, shutdown := w.queue.Get()
+	if shutdown {
+		return false
+	}
+	defer w.queue.Done(imageRef)
+
+	err := w.inspect(ctx, imageRef)
+	switch {
+	case err == nil:
+		w.queue.Forget(imageRef)
+
+	case ctx.Err() != nil:
+		// Shutting down: drop the item without burning a retry.
+		w.queue.Forget(imageRef)
+		w.store.FailImage(imageRef)
+		w.forgetAuth(imageRef)
+
+	case w.queue.NumRequeues(imageRef)+1 >= maxAttempts:
+		w.logger.Error("inspection failed, giving up",
+			"image", imageRef, "attempts", maxAttempts, "err", err)
+		w.queue.Forget(imageRef)
+		// Clearing pending lets a later pod event re-trigger the image.
+		w.store.FailImage(imageRef)
+		w.forgetAuth(imageRef)
+
+	default:
+		w.logger.Warn("inspection failed, retrying",
+			"image", imageRef, "attempt", w.queue.NumRequeues(imageRef)+1, "err", err)
+		w.queue.AddRateLimited(imageRef)
+	}
+	return true
+}
+
+// inspect performs one inspection attempt and stores the result on success.
+func (w *Watcher) inspect(ctx context.Context, imageRef string) error {
+	auth, ok := w.authFor(imageRef)
+	if !ok {
+		return nil // no longer tracked: the image was resolved or dropped meanwhile
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, inspectTimeout)
+	defer cancel()
+
+	digest, platforms, err := w.inspector.Inspect(ctx, imageRef, auth)
+	if err != nil {
+		return fmt.Errorf("inspect %q: %w", imageRef, err)
+	}
+
+	w.store.SetImage(imageRef, digest, platforms)
+	w.forgetAuth(imageRef)
+	w.logger.Info("inspection done",
+		"image", imageRef,
+		"digest", shortDigest(digest),
+		"platforms", len(platforms),
+	)
+	return nil
+}
+
+// onPod reconciles a pod's image set and queues whatever needs inspecting.
+// It is used for both add and update events.
+func (w *Watcher) onPod(pod *corev1.Pod) {
+	podRef := pod.Namespace + "/" + pod.Name
 	auth := inspector.PodAuth{
 		Namespace:          pod.Namespace,
 		ServiceAccountName: pod.Spec.ServiceAccountName,
@@ -102,34 +226,35 @@ func (w *Watcher) onAdd(ctx context.Context, pod *corev1.Pod) {
 	}
 
 	for _, imageRef := range w.store.SetPodImages(podRef, slices.Collect(uniqueImages(pod))) {
+		w.rememberAuth(imageRef, auth)
+		w.queue.Add(imageRef)
 		w.logger.Info("new image detected, queuing inspection", "image", imageRef, "pod", podRef)
-
-		// Go 1.22+: loop variable is scoped per iteration, no explicit capture needed.
-		go func() {
-			w.sem <- struct{}{}
-			defer func() { <-w.sem }()
-
-			digest, platforms, err := w.inspector.Inspect(ctx, imageRef, auth)
-			if err != nil {
-				w.logger.Error("inspection failed", "image", imageRef, "err", err)
-				w.store.FailImage(imageRef)
-				return
-			}
-
-			w.store.SetImage(imageRef, digest, platforms)
-			w.logger.Info("inspection done",
-				"image", imageRef,
-				"digest", shortDigest(digest),
-				"platforms", len(platforms),
-			)
-		}()
 	}
 }
 
 func (w *Watcher) onDelete(pod *corev1.Pod) {
-	podRef := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+	podRef := pod.Namespace + "/" + pod.Name
 	w.store.RemovePod(podRef)
 	w.logger.Debug("pod removed", "pod", podRef)
+}
+
+func (w *Watcher) rememberAuth(imageRef string, auth inspector.PodAuth) {
+	w.authMu.Lock()
+	defer w.authMu.Unlock()
+	w.authByImage[imageRef] = auth
+}
+
+func (w *Watcher) authFor(imageRef string) (inspector.PodAuth, bool) {
+	w.authMu.Lock()
+	defer w.authMu.Unlock()
+	auth, ok := w.authByImage[imageRef]
+	return auth, ok
+}
+
+func (w *Watcher) forgetAuth(imageRef string) {
+	w.authMu.Lock()
+	defer w.authMu.Unlock()
+	delete(w.authByImage, imageRef)
 }
 
 // toPod extracts a *corev1.Pod from an event object, handling DeletedFinalStateUnknown.
@@ -142,6 +267,26 @@ func toPod(obj any) (*corev1.Pod, bool) {
 		return pod, ok
 	}
 	return nil, false
+}
+
+// sameImages reports whether two revisions of a pod expose the same image set.
+// Go 1.23: iter.Pull walks both sequences in lockstep, without materialising them.
+func sameImages(a, b *corev1.Pod) bool {
+	nextA, stopA := iter.Pull(uniqueImages(a))
+	defer stopA()
+	nextB, stopB := iter.Pull(uniqueImages(b))
+	defer stopB()
+
+	for {
+		imgA, okA := nextA()
+		imgB, okB := nextB()
+		if okA != okB || imgA != imgB {
+			return false
+		}
+		if !okA {
+			return true
+		}
+	}
 }
 
 // uniqueImages returns an iterator over deduplicated, non-empty image refs from all
