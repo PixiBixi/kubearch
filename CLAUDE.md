@@ -72,7 +72,9 @@ All workflows live in `.github/workflows/`, actions are pinned by SHA:
 
 ## Release
 
-Automatic on push to `main` — `mathieudutour/github-tag-action` computes the next `vX.Y.Z` from conventional commits (`default_bump: false`, so a chore-only push releases nothing) and tags, then GoReleaser and the Helm chart push run in the same job. Manual `v*` tag push still works.
+Automatic on push to `main` — [`svu`](https://github.com/caarlos0/svu) computes the next `vX.Y.Z` from the conventional commits since the last tag, the workflow creates the tag through the API, then GoReleaser and the Helm chart push run in the same job. Manual `v*` tag push still works as an escape hatch.
+
+Only `feat:` (minor) and `fix:` (patch) cut a release; `--v0` keeps a breaking change from jumping to `v1.0.0` while the project is pre-1.0. **`perf:` does not release** — svu follows the Conventional Commits spec, where only `fix` and `feat` are normative. Use `fix:` if a change must ship on its own.
 
 Renovate drives dependency releases: gomod minor → `feat(deps)` (minor), patch/digest → `fix(deps)` (patch), github-actions and dockerfile → `chore(deps)` (no release). Minor/patch/digest PRs automerge once CI is green.
 
