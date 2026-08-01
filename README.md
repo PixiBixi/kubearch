@@ -270,7 +270,10 @@ make snapshot
 
 Releases are cut automatically from [Conventional Commits](https://www.conventionalcommits.org/):
 
-1. Push (or merge) commits to `main` — `feat:` bumps the minor, `fix:`/`perf:` the patch, `chore:`/`docs:`/`ci:` release nothing
+1. Push (or merge) commits to `main` — `feat:` bumps the minor, `fix:` the patch,
+   a breaking change the minor while the project is still `0.x`. Every other type
+   (`chore:`, `docs:`, `ci:`, `perf:`, `refactor:`, `test:`) releases nothing, so
+   mark a change with `fix:` if it needs to ship on its own
 2. The `Release` workflow computes the next `vX.Y.Z` and creates the tag
 3. In the same run, GoReleaser publishes the binaries and the multi-arch image to `ghcr.io/PixiBixi/kubearch`, then the Helm chart is pushed to `oci://ghcr.io/pixibixi/kubearch/charts`
 
