@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/google/go-containerregistry v0.21.9
-	github.com/google/go-containerregistry/pkg/authn/kubernetes v0.0.0-20260819004450-5b5c27267a68
+	github.com/google/go-containerregistry/pkg/authn/kubernetes v0.0.0-20260819205953-8f4a85dbcf7a
 	github.com/prometheus/client_golang v1.24.1
 	golang.org/x/sync v0.22.0
 	k8s.io/api v0.36.3
@@ -16,7 +16,7 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/docker/cli v29.6.2+incompatible // indirect
+	github.com/docker/cli v29.7.2+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.9.4 // indirect
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
