@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
+	"runtime/pprof"
 	"slices"
 	"sync"
 	"time"
@@ -36,6 +37,8 @@ const (
 	maxRetryDelay  = 1 * time.Minute
 	// shortDigestLen is "sha256:" (7 chars) + 12 hex chars — enough to identify a digest in logs.
 	shortDigestLen = 19
+	// workerLabel tags the inspection workers in profiles and tracebacks.
+	workerLabel = "inspect-worker"
 )
 
 // Inspector inspects a container image and returns its digest and supported platforms.
@@ -178,8 +181,13 @@ func (w *Watcher) startWorkers(ctx context.Context) (stop func()) {
 	for range w.workers {
 		// Go 1.25: WaitGroup.Go pairs Add/Done with the goroutine itself.
 		wg.Go(func() {
-			for w.processNext(ctx) {
-			}
+			// Go 1.27 prints goroutine labels in tracebacks, not just in
+			// profiles: a panic or a SIGQUIT dump then names the worker pool
+			// instead of showing ten anonymous closures.
+			pprof.Do(ctx, pprof.Labels("component", workerLabel), func(ctx context.Context) {
+				for w.processNext(ctx) {
+				}
+			})
 		})
 	}
 	return func() {
