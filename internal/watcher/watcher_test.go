@@ -13,7 +13,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
 
@@ -109,8 +108,9 @@ func makePod(ns, name string, images ...string) *corev1.Pod {
 		containers[i] = corev1.Container{Image: img}
 	}
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec:       corev1.PodSpec{Containers: containers},
+		Name:      name,
+		Namespace: ns,
+		Spec:      corev1.PodSpec{Containers: containers},
 	}
 }
 
@@ -481,7 +481,7 @@ func TestSameImages_EphemeralContainerAdded(t *testing.T) {
 	a := makePod("default", "pod1", "nginx:1.26")
 	b := makePod("default", "pod1", "nginx:1.26")
 	b.Spec.EphemeralContainers = []corev1.EphemeralContainer{
-		{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Image: "busybox:1"}},
+		{Image: "busybox:1"},
 	}
 
 	if sameImages(a, b) {
@@ -492,7 +492,7 @@ func TestSameImages_EphemeralContainerAdded(t *testing.T) {
 // --- toPod ---
 
 func TestToPod_DirectPod(t *testing.T) {
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p1", Namespace: "ns"}}
+	pod := &corev1.Pod{Name: "p1", Namespace: "ns"}
 	got, ok := toPod(pod)
 	if !ok {
 		t.Fatal("expected ok=true for *corev1.Pod")
@@ -503,7 +503,7 @@ func TestToPod_DirectPod(t *testing.T) {
 }
 
 func TestToPod_DeletedFinalStateUnknown(t *testing.T) {
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p2", Namespace: "ns"}}
+	pod := &corev1.Pod{Name: "p2", Namespace: "ns"}
 	tombstone := cache.DeletedFinalStateUnknown{Key: "ns/p2", Obj: pod}
 	got, ok := toPod(tombstone)
 	if !ok {
@@ -570,7 +570,7 @@ func TestUniqueImages_AllContainerTypes(t *testing.T) {
 		Spec: corev1.PodSpec{
 			InitContainers:      []corev1.Container{{Image: "init:1"}},
 			Containers:          []corev1.Container{{Image: "app:1"}},
-			EphemeralContainers: []corev1.EphemeralContainer{{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Image: "debug:1"}}},
+			EphemeralContainers: []corev1.EphemeralContainer{{Image: "debug:1"}},
 		},
 	}
 	var images []string
@@ -601,7 +601,7 @@ func TestContainerImages_Order(t *testing.T) {
 			InitContainers: []corev1.Container{{Image: "init:1"}, {Image: "init:2"}},
 			Containers:     []corev1.Container{{Image: "app:1"}},
 			EphemeralContainers: []corev1.EphemeralContainer{
-				{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Image: "debug:1"}},
+				{Image: "debug:1"},
 			},
 		},
 	}
