@@ -72,7 +72,7 @@ Two things a bubble demands: every goroutine started in it must have exited when
 All workflows live in `.github/workflows/`, actions are pinned by SHA:
 
 - **CI** (`ci.yml`): `go mod verify`, build, `go test -race`
-- **Lint** (`lint.yml`): golangci-lint v2.12.2 against `.golangci.yml`
+- **Lint** (`lint.yml`): golangci-lint v2.13.1 against `.golangci.yml`. Its `modernize` linter is gated on the module's `go` directive, so raising that directive can turn previously silent rewrites into build failures — run `go fix -diff ./...` after any bump.
 - **github-actions** (`github-actions.yml`): zizmor audit of the workflows, SARIF to code scanning
 - **govulncheck** (`govulncheck.yml`): reachable vulnerabilities in dependencies
 - **Go format** / **markdownlint**: reviewdog inline suggestions on PRs
