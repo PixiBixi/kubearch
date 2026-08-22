@@ -73,16 +73,12 @@ func TestInspect_MultiArch(t *testing.T) {
 	// Assemble a multi-arch OCI image index with explicit platform descriptors.
 	idx := mutate.AppendManifests(empty.Index,
 		mutate.IndexAddendum{
-			Add: img1,
-			Descriptor: v1.Descriptor{
-				Platform: &v1.Platform{OS: "linux", Architecture: "amd64"},
-			},
+			Add:      img1,
+			Platform: &v1.Platform{OS: "linux", Architecture: "amd64"},
 		},
 		mutate.IndexAddendum{
-			Add: img2,
-			Descriptor: v1.Descriptor{
-				Platform: &v1.Platform{OS: "linux", Architecture: "arm64"},
-			},
+			Add:      img2,
+			Platform: &v1.Platform{OS: "linux", Architecture: "arm64"},
 		},
 	)
 
