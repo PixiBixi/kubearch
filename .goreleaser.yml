@@ -8,6 +8,7 @@ before:
 builds:
   - id: kubearch
     binary: kubearch
+    main: .
     env:
       - CGO_ENABLED=0
     goos:
@@ -31,6 +32,9 @@ upx:
 
 kos:
   - id: kubearch
+    # Go 1.27 rejects `go list ""` ("invalid package"), which ko does when this
+    # is left to default off the build. Must stay explicit.
+    main: .
     repositories:
       - ghcr.io/pixibixi/kubearch
     base_image: gcr.io/distroless/static:nonroot
