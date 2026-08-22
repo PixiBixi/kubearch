@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"runtime/pprof"
 	"slices"
 	"sync"
 	"testing"
@@ -425,6 +426,32 @@ func TestWorkers_BoundConcurrency(t *testing.T) {
 		defer mu.Unlock()
 		if peak != w.workers {
 			t.Errorf("peak concurrency = %d, want exactly %d (the worker count)", peak, w.workers)
+		}
+	})
+}
+
+// Inspections run under a pprof label, so a goroutine dump or a CPU profile
+// taken in production points at the worker pool rather than at ten anonymous
+// closures.
+func TestWorkers_CarryPprofLabel(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		labels := make(chan string, 1)
+
+		w := newTestWatcher(s, &fakeInspector{
+			fn: func(ctx context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+				label, _ := pprof.Label(ctx, "component")
+				labels <- label
+				return "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+			},
+		})
+		startWorkers(t, w)
+
+		w.onPod(makePod("default", "pod1", "nginx:latest"))
+
+		settle(t, "the inspection to run", func() bool { return len(labels) == 1 })
+		if got := <-labels; got != workerLabel {
+			t.Errorf("worker pprof label %q = %q, want %q", "component", got, workerLabel)
 		}
 	})
 }
