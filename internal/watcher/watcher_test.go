@@ -8,13 +8,13 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/util/workqueue"
 
 	"github.com/PixiBixi/kubearch/internal/inspector"
 	"github.com/PixiBixi/kubearch/internal/store"
@@ -65,19 +65,19 @@ func newTestWatcher(s *store.Store, insp Inspector) *Watcher {
 }
 
 func newTestWatcherWithMetrics(s *store.Store, insp Inspector, metrics Metrics) *Watcher {
-	w := New(k8sfake.NewClientset(), "default", s, insp, slog.New(slog.NewTextHandler(io.Discard, nil)), metrics)
-	// Keep the backoff curve, compress it: retry behaviour is what we assert on,
-	// not the wall-clock delay.
-	w.queue = workqueue.NewTypedRateLimitingQueue(
-		workqueue.NewTypedItemExponentialFailureRateLimiter[string](time.Millisecond, 20*time.Millisecond),
-	)
-	return w
+	// The production rate limiter is used as-is: inside a synctest bubble the
+	// retry delays run on the fake clock, so the real backoff curve is what
+	// gets exercised and it costs no wall-clock time to wait out.
+	return New(k8sfake.NewClientset(), "default", s, insp, slog.New(slog.NewTextHandler(io.Discard, nil)), metrics)
 }
 
 // startWorkers runs the inspection workers for the duration of the test.
+// The shutdown is registered with t.Cleanup rather than deferred because
+// synctest runs cleanups inside the bubble, and a bubble only ends once every
+// goroutine started in it has exited — including the queue's own loops.
 func startWorkers(t *testing.T, w *Watcher) {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	stop := w.startWorkers(ctx)
 	t.Cleanup(func() {
 		cancel()
@@ -85,15 +85,19 @@ func startWorkers(t *testing.T, w *Watcher) {
 	})
 }
 
-// waitFor blocks until cond holds or the test times out.
-func waitFor(t *testing.T, what string, cond func() bool) {
+// settle blocks until cond holds, advancing the bubble's fake clock one second
+// at a time so rate-limited retries get their turn. synctest.Sleep waits for
+// the watcher to go quiet again after each step, so a passing assertion is
+// never a race — and the whole loop takes no wall-clock time, hence the
+// generous budget.
+func settle(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	for range 300 {
+		synctest.Wait()
 		if cond() {
 			return
 		}
-		time.Sleep(2 * time.Millisecond)
+		synctest.Sleep(time.Second)
 	}
 	t.Fatalf("timed out waiting for %s", what)
 }
@@ -112,225 +116,244 @@ func makePod(ns, name string, images ...string) *corev1.Pod {
 // --- onPod / inspection loop ---
 
 func TestOnPod_StoresImage(t *testing.T) {
-	s := store.New()
-	w := newTestWatcher(s, &fakeInspector{
-		fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
-			return "sha256:deadbeef", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
-		},
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		w := newTestWatcher(s, &fakeInspector{
+			fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+				return "sha256:deadbeef", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+			},
+		})
+		startWorkers(t, w)
+
+		w.onPod(makePod("default", "pod1", "nginx:latest"))
+
+		settle(t, "the image to land in the store", func() bool { return len(s.Snapshot()) == 1 })
+
+		imgs := s.Snapshot()
+		if imgs[0].Digest != "sha256:deadbeef" {
+			t.Errorf("unexpected digest: %s", imgs[0].Digest)
+		}
+		if len(imgs[0].Platforms) != 1 || imgs[0].Platforms[0].Arch != "amd64" {
+			t.Errorf("unexpected platforms: %v", imgs[0].Platforms)
+		}
 	})
-	startWorkers(t, w)
-
-	w.onPod(makePod("default", "pod1", "nginx:latest"))
-
-	waitFor(t, "the image to land in the store", func() bool { return len(s.Snapshot()) == 1 })
-
-	imgs := s.Snapshot()
-	if imgs[0].Digest != "sha256:deadbeef" {
-		t.Errorf("unexpected digest: %s", imgs[0].Digest)
-	}
-	if len(imgs[0].Platforms) != 1 || imgs[0].Platforms[0].Arch != "amd64" {
-		t.Errorf("unexpected platforms: %v", imgs[0].Platforms)
-	}
 }
 
 func TestOnPod_AlreadyKnownSkipsReinspection(t *testing.T) {
-	s := store.New()
-	var mu sync.Mutex
-	calls := 0
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		var mu sync.Mutex
+		calls := 0
 
-	w := newTestWatcher(s, &fakeInspector{
-		fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
-			mu.Lock()
-			calls++
-			mu.Unlock()
-			return "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
-		},
+		w := newTestWatcher(s, &fakeInspector{
+			fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+				mu.Lock()
+				calls++
+				mu.Unlock()
+				return "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+			},
+		})
+		startWorkers(t, w)
+
+		w.onPod(makePod("default", "pod1", "nginx:latest"))
+		settle(t, "the first inspection", func() bool { return len(s.Snapshot()) == 1 })
+
+		w.onPod(makePod("default", "pod2", "nginx:latest"))
+		synctest.Wait() // a spurious inspection would have to run before this returns
+
+		mu.Lock()
+		defer mu.Unlock()
+		if calls != 1 {
+			t.Errorf("expected 1 inspection call, got %d", calls)
+		}
 	})
-	startWorkers(t, w)
-
-	w.onPod(makePod("default", "pod1", "nginx:latest"))
-	waitFor(t, "the first inspection", func() bool { return len(s.Snapshot()) == 1 })
-
-	w.onPod(makePod("default", "pod2", "nginx:latest"))
-	time.Sleep(100 * time.Millisecond) // let a spurious inspection show up if any
-
-	mu.Lock()
-	defer mu.Unlock()
-	if calls != 1 {
-		t.Errorf("expected 1 inspection call, got %d", calls)
-	}
 }
 
 // A pod spec can be updated in place; the new image must be inspected and the
 // replaced one dropped.
 func TestOnPod_UpdateSwapsImage(t *testing.T) {
-	s := store.New()
-	w := newTestWatcher(s, &fakeInspector{
-		fn: func(_ context.Context, imageRef string, _ inspector.PodAuth) (string, []types.Platform, error) {
-			return "sha256:" + imageRef, []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
-		},
-	})
-	startWorkers(t, w)
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		w := newTestWatcher(s, &fakeInspector{
+			fn: func(_ context.Context, imageRef string, _ inspector.PodAuth) (string, []types.Platform, error) {
+				return "sha256:" + imageRef, []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+			},
+		})
+		startWorkers(t, w)
 
-	w.onPod(makePod("default", "pod1", "nginx:1.26"))
-	waitFor(t, "the first image", func() bool { return len(s.Snapshot()) == 1 })
+		w.onPod(makePod("default", "pod1", "nginx:1.26"))
+		settle(t, "the first image", func() bool { return len(s.Snapshot()) == 1 })
 
-	w.onPod(makePod("default", "pod1", "nginx:1.27"))
-	waitFor(t, "the swapped image", func() bool {
-		snap := s.Snapshot()
-		return len(snap) == 1 && snap[0].Ref == "nginx:1.27"
+		w.onPod(makePod("default", "pod1", "nginx:1.27"))
+		settle(t, "the swapped image", func() bool {
+			snap := s.Snapshot()
+			return len(snap) == 1 && snap[0].Ref == "nginx:1.27"
+		})
 	})
 }
 
 func TestInspect_RetriesUntilSuccess(t *testing.T) {
-	s := store.New()
-	var mu sync.Mutex
-	calls := 0
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		var mu sync.Mutex
+		calls := 0
 
-	w := newTestWatcher(s, &fakeInspector{
-		fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
-			mu.Lock()
-			calls++
-			n := calls
-			mu.Unlock()
-			if n < 3 {
-				return "", nil, errors.New("registry unavailable")
-			}
-			return "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
-		},
+		w := newTestWatcher(s, &fakeInspector{
+			fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+				mu.Lock()
+				calls++
+				n := calls
+				mu.Unlock()
+				if n < 3 {
+					return "", nil, errors.New("registry unavailable")
+				}
+				return "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+			},
+		})
+		startWorkers(t, w)
+
+		w.onPod(makePod("default", "pod1", "flaky:image"))
+
+		settle(t, "the retried inspection to succeed", func() bool { return len(s.Snapshot()) == 1 })
+
+		mu.Lock()
+		defer mu.Unlock()
+		if calls != 3 {
+			t.Errorf("expected 3 attempts, got %d", calls)
+		}
 	})
-	startWorkers(t, w)
-
-	w.onPod(makePod("default", "pod1", "flaky:image"))
-
-	waitFor(t, "the retried inspection to succeed", func() bool { return len(s.Snapshot()) == 1 })
-
-	mu.Lock()
-	defer mu.Unlock()
-	if calls != 3 {
-		t.Errorf("expected 3 attempts, got %d", calls)
-	}
 }
 
 func TestInspect_ReportsSuccessMetric(t *testing.T) {
-	s := store.New()
-	metrics := &fakeMetrics{}
-	w := newTestWatcherWithMetrics(s, &fakeInspector{
-		fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
-			return "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
-		},
-	}, metrics)
-	startWorkers(t, w)
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		metrics := &fakeMetrics{}
+		w := newTestWatcherWithMetrics(s, &fakeInspector{
+			fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+				return "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+			},
+		}, metrics)
+		startWorkers(t, w)
 
-	w.onPod(makePod("default", "pod1", "nginx:latest"))
-	waitFor(t, "the inspection to succeed", func() bool { return len(s.Snapshot()) == 1 })
+		w.onPod(makePod("default", "pod1", "nginx:latest"))
+		settle(t, "the inspection to succeed", func() bool { return len(s.Snapshot()) == 1 })
 
-	inspections, retries := metrics.snapshot()
-	if !slices.Equal(inspections, []string{"success"}) {
-		t.Errorf("recorded inspections = %v, want [success]", inspections)
-	}
-	if retries != 0 {
-		t.Errorf("recorded retries = %d, want 0", retries)
-	}
+		inspections, retries := metrics.snapshot()
+		if !slices.Equal(inspections, []string{"success"}) {
+			t.Errorf("recorded inspections = %v, want [success]", inspections)
+		}
+		if retries != 0 {
+			t.Errorf("recorded retries = %d, want 0", retries)
+		}
+	})
 }
 
 func TestInspect_ReportsFailureAndRetryMetrics(t *testing.T) {
-	s := store.New()
-	metrics := &fakeMetrics{}
-	w := newTestWatcherWithMetrics(s, &fakeInspector{
-		fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
-			return "", nil, errors.New("registry unavailable")
-		},
-	}, metrics)
-	startWorkers(t, w)
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		metrics := &fakeMetrics{}
+		w := newTestWatcherWithMetrics(s, &fakeInspector{
+			fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+				return "", nil, errors.New("registry unavailable")
+			},
+		}, metrics)
+		startWorkers(t, w)
 
-	w.onPod(makePod("default", "pod1", "broken:image"))
+		w.onPod(makePod("default", "pod1", "broken:image"))
 
-	waitFor(t, "retries to be exhausted", func() bool {
-		inspections, _ := metrics.snapshot()
-		return len(inspections) == maxAttempts
-	})
+		settle(t, "retries to be exhausted", func() bool {
+			inspections, _ := metrics.snapshot()
+			return len(inspections) == maxAttempts
+		})
 
-	inspections, retries := metrics.snapshot()
-	for _, result := range inspections {
-		if result != "failure" {
-			t.Errorf("recorded inspections = %v, want all \"failure\"", inspections)
-			break
+		inspections, retries := metrics.snapshot()
+		for _, result := range inspections {
+			if result != "failure" {
+				t.Errorf("recorded inspections = %v, want all \"failure\"", inspections)
+				break
+			}
 		}
-	}
-	// Every attempt but the last (which gives up instead) is followed by a retry.
-	if want := maxAttempts - 1; retries != want {
-		t.Errorf("recorded retries = %d, want %d", retries, want)
-	}
+		// Every attempt but the last (which gives up instead) is followed by a retry.
+		if want := maxAttempts - 1; retries != want {
+			t.Errorf("recorded retries = %d, want %d", retries, want)
+		}
+	})
 }
 
 func TestInspect_GivesUpAfterMaxAttempts(t *testing.T) {
-	s := store.New()
-	var mu sync.Mutex
-	calls := 0
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		var mu sync.Mutex
+		calls := 0
 
-	w := newTestWatcher(s, &fakeInspector{
-		fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+		w := newTestWatcher(s, &fakeInspector{
+			fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+				mu.Lock()
+				calls++
+				mu.Unlock()
+				return "", nil, errors.New("always down")
+			},
+		})
+		startWorkers(t, w)
+
+		w.onPod(makePod("default", "pod1", "broken:image"))
+
+		settle(t, "the retries to be exhausted", func() bool {
 			mu.Lock()
-			calls++
-			mu.Unlock()
-			return "", nil, errors.New("always down")
-		},
-	})
-	startWorkers(t, w)
+			defer mu.Unlock()
+			return calls == maxAttempts
+		})
+		// Well past maxRetryDelay: a sixth attempt would have fired by now.
+		synctest.Sleep(5 * time.Minute)
 
-	w.onPod(makePod("default", "pod1", "broken:image"))
-
-	waitFor(t, "the retries to be exhausted", func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return calls == maxAttempts
+		if calls != maxAttempts {
+			t.Errorf("expected exactly %d attempts, got %d", maxAttempts, calls)
+		}
+		if n := len(s.Snapshot()); n != 0 {
+			t.Errorf("expected 0 images in store after failure, got %d", n)
+		}
+		// Pending must be cleared, so a later pod event can retry the image.
+		if _, pending, _ := s.Stats(); pending != 0 {
+			t.Errorf("expected 0 pending images after giving up, got %d", pending)
+		}
 	})
-	time.Sleep(100 * time.Millisecond) // no further attempt must follow
-
-	mu.Lock()
-	defer mu.Unlock()
-	if calls != maxAttempts {
-		t.Errorf("expected exactly %d attempts, got %d", maxAttempts, calls)
-	}
-	if n := len(s.Snapshot()); n != 0 {
-		t.Errorf("expected 0 images in store after failure, got %d", n)
-	}
-	// Pending must be cleared, so a later pod event can retry the image.
-	if _, pending, _ := s.Stats(); pending != 0 {
-		t.Errorf("expected 0 pending images after giving up, got %d", pending)
-	}
 }
 
 // A registry that accepts the connection and never answers must not pin a
 // worker: every inspection runs under a deadline.
 func TestInspect_AppliesTimeout(t *testing.T) {
-	s := store.New()
-	deadlines := make(chan time.Duration, 1)
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		deadlines := make(chan time.Duration, 1)
 
-	w := newTestWatcher(s, &fakeInspector{
-		fn: func(ctx context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
-			deadline, ok := ctx.Deadline()
-			if !ok {
-				deadlines <- 0
-				return "", nil, errors.New("no deadline")
+		w := newTestWatcher(s, &fakeInspector{
+			fn: func(ctx context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+				deadline, ok := ctx.Deadline()
+				if !ok {
+					deadlines <- 0
+					return "", nil, errors.New("no deadline")
+				}
+				deadlines <- time.Until(deadline)
+				return "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+			},
+		})
+		startWorkers(t, w)
+
+		w.onPod(makePod("default", "pod1", "slow:image"))
+
+		select {
+		case d := <-deadlines:
+			// The bubble's clock cannot advance while the inspection runs, so
+			// the remaining budget is the full timeout, to the nanosecond.
+			if d != inspectTimeout {
+				t.Errorf("inspection deadline = %v, want %v", d, inspectTimeout)
 			}
-			deadlines <- time.Until(deadline)
-			return "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
-		},
-	})
-	startWorkers(t, w)
-
-	w.onPod(makePod("default", "pod1", "slow:image"))
-
-	select {
-	case d := <-deadlines:
-		if d <= 0 || d > inspectTimeout {
-			t.Errorf("inspection deadline = %v, want in (0, %v]", d, inspectTimeout)
+		case <-time.After(time.Minute):
+			t.Fatal("timed out waiting for the inspection")
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for the inspection")
-	}
+	})
 }
 
 func TestOnDelete_RemovesPodFromStore(t *testing.T) {
@@ -359,46 +382,51 @@ func TestOnDelete_RemovesPodFromStore(t *testing.T) {
 }
 
 func TestWorkers_BoundConcurrency(t *testing.T) {
-	s := store.New()
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
 
-	const numImages = 20
-	images := make([]string, numImages)
-	for i := range images {
-		images[i] = "image-" + string(rune('a'+i)) + ":latest"
-	}
+		const numImages = 20
+		images := make([]string, numImages)
+		for i := range images {
+			images[i] = "image-" + string(rune('a'+i)) + ":latest"
+		}
 
-	var mu sync.Mutex
-	active, peak := 0, 0
+		var mu sync.Mutex
+		active, peak := 0, 0
 
-	w := newTestWatcher(s, &fakeInspector{
-		fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
-			mu.Lock()
-			active++
-			if active > peak {
-				peak = active
-			}
-			mu.Unlock()
+		w := newTestWatcher(s, &fakeInspector{
+			fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+				mu.Lock()
+				active++
+				if active > peak {
+					peak = active
+				}
+				mu.Unlock()
 
-			time.Sleep(20 * time.Millisecond)
+				// The bubble's clock only moves once every worker is parked
+				// here, so the overlap is exact rather than probabilistic:
+				// peak reaches the worker count, and must not exceed it.
+				time.Sleep(20 * time.Millisecond)
 
-			mu.Lock()
-			active--
-			mu.Unlock()
+				mu.Lock()
+				active--
+				mu.Unlock()
 
-			return "sha256:ok", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
-		},
+				return "sha256:ok", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+			},
+		})
+		startWorkers(t, w)
+
+		w.onPod(makePod("default", "big-pod", images...))
+
+		settle(t, "all inspections", func() bool { return len(s.Snapshot()) == numImages })
+
+		mu.Lock()
+		defer mu.Unlock()
+		if peak != w.workers {
+			t.Errorf("peak concurrency = %d, want exactly %d (the worker count)", peak, w.workers)
+		}
 	})
-	startWorkers(t, w)
-
-	w.onPod(makePod("default", "big-pod", images...))
-
-	waitFor(t, "all inspections", func() bool { return len(s.Snapshot()) == numImages })
-
-	mu.Lock()
-	defer mu.Unlock()
-	if peak > w.workers {
-		t.Errorf("peak concurrency %d exceeded the %d workers", peak, w.workers)
-	}
 }
 
 // --- sameImages ---

@@ -59,6 +59,14 @@ watcher → workqueue → workers → store ← collector → Prometheus /metric
 - **Bounded everything**: goroutines (worker pool), inspection latency (deadline), retries (max attempts), credential staleness (TTL). See `PERFORMANCE.md` for the measurements behind these choices.
 - **Go version**: requires Go 1.27. The code uses `maps.Values` (1.23), `iter.Seq`/`iter.Pull` (1.23), `WaitGroup.Go` (1.25), and per-iteration loop variable scoping (1.22). The `go` directive is what CI and GoReleaser pin their toolchain to (`go-version-file: go.mod`), so it also decides which runtime the published binary gets — 1.27 brings size-specialized malloc and the `encoding/json` v2 backend, both on the scrape and inspection hot paths.
 
+## Testing
+
+Everything in `internal/watcher` that involves the worker pool runs inside a `synctest.Test` bubble: the fake clock makes the queue's retry backoff free to wait out, so the tests exercise the *production* rate limiter instead of a compressed one, and `settle` replaces polling — a passing assertion means the watcher has actually gone quiet, not that a sleep happened to be long enough.
+
+Two things a bubble demands: every goroutine started in it must have exited when the test function returns (hence `startWorkers` shutting the queue down via `t.Cleanup`, which synctest runs inside the bubble), and no real network. `TestPodBurst_BoundsGoroutines` stays outside — it reads `runtime.NumGoroutine()`, which is process-wide and would count goroutines the bubble knows nothing about.
+
+`internal/inspector` keeps real `httptest.NewServer` instances. `httptest.NewTestServer` (Go 1.27) is only reachable through its own `Server.Client`, and the inspector deliberately builds its own `remote.Puller` with go-containerregistry's transport — wiring a transport override into production code just to make the tests in-memory is not a trade worth making.
+
 ## CI
 
 All workflows live in `.github/workflows/`, actions are pinned by SHA:
