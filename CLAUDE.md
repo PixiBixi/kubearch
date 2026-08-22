@@ -57,7 +57,7 @@ watcher → workqueue → workers → store ← collector → Prometheus /metric
 - **Pod specs are not immutable**: `kubectl set image` rewrites `spec.containers[*].image` and ephemeral containers appear on running pods, which is why `UpdateFunc` exists.
 - **Orphan cleanup**: `store.SetImage` checks that at least one pod still references the image before storing (handles race between inspection and pod deletion).
 - **Bounded everything**: goroutines (worker pool), inspection latency (deadline), retries (max attempts), credential staleness (TTL). See `PERFORMANCE.md` for the measurements behind these choices.
-- **Go version**: requires Go 1.26. The code uses `maps.Values` (1.23), `iter.Seq`/`iter.Pull` (1.23), `WaitGroup.Go` (1.25), and per-iteration loop variable scoping (1.22).
+- **Go version**: requires Go 1.27. The code uses `maps.Values` (1.23), `iter.Seq`/`iter.Pull` (1.23), `WaitGroup.Go` (1.25), and per-iteration loop variable scoping (1.22). The `go` directive is what CI and GoReleaser pin their toolchain to (`go-version-file: go.mod`), so it also decides which runtime the published binary gets — 1.27 brings size-specialized malloc and the `encoding/json` v2 backend, both on the scrape and inspection hot paths.
 
 ## CI
 

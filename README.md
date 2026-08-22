@@ -1,6 +1,6 @@
 # kubearch
 
-![Go version](https://img.shields.io/badge/go-1.26-blue)
+![Go version](https://img.shields.io/badge/go-1.27-blue)
 ![License](https://img.shields.io/github/license/PixiBixi/kubearch)
 ![Docker](https://img.shields.io/badge/ghcr.io-PixiBixi%2Fkubearch-blue)
 
