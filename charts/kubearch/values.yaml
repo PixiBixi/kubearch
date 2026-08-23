@@ -55,7 +55,7 @@ service:
 serviceMonitor:
   # Enable ServiceMonitor for Prometheus Operator (kube-prometheus-stack, etc.).
   enabled: false
-  # Scrape interval — kubearch data only changes on pod events, 60s is sufficient.
+  # Scrape interval: kubearch data only changes on pod events, 60s is sufficient.
   interval: 60s
   scrapeTimeout: 10s
   # Extra labels to add to the ServiceMonitor (e.g. to match your Prometheus selector).

@@ -1,7 +1,7 @@
 {{- if .Values.rbac.create }}
 {{- if .Values.watchNamespace }}
 ---
-# Namespace-scoped RBAC — used when watchNamespace is set.
+# Namespace-scoped RBAC: used when watchNamespace is set.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -34,7 +34,7 @@ subjects:
     namespace: {{ .Release.Namespace }}
 {{- else }}
 ---
-# Cluster-scoped RBAC — used when watching all namespaces (default).
+# Cluster-scoped RBAC: used when watching all namespaces (default).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
