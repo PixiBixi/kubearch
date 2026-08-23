@@ -40,7 +40,7 @@ func New() *Store {
 // SetPodImages replaces the image set of podRef with imageRefs and returns the
 // refs that require inspection (neither known nor already in flight). Images the
 // pod no longer references are unlinked, and dropped entirely once no pod uses
-// them — which is what makes this safe to call on pod updates, not just adds.
+// them, which is what makes this safe to call on pod updates, not just adds.
 func (s *Store) SetPodImages(podRef string, imageRefs []string) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

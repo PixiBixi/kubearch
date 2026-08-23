@@ -23,7 +23,7 @@ import (
 
 // credTTL bounds how long resolved credentials are reused. Building them costs
 // one ServiceAccount GET plus one GET per imagePullSecret, live against the API
-// server — paying that per image is what this cache exists to avoid. Pull
+// server. Paying that per image is what this cache exists to avoid. Pull
 // secrets do rotate, hence the expiry (and the eviction on auth failure).
 const credTTL = 5 * time.Minute
 
@@ -35,7 +35,7 @@ type PodAuth struct {
 }
 
 // cacheKey identifies the credentials a pod resolves to. Pods of the same
-// workload — and usually of the same namespace — share one.
+// workload, and usually of the same namespace, share one.
 func (a PodAuth) cacheKey() string {
 	secrets := slices.Sorted(slices.Values(a.ImagePullSecrets))
 	return a.Namespace + "\x00" + a.ServiceAccountName + "\x00" + strings.Join(secrets, ",")
@@ -100,9 +100,9 @@ func (i *Inspector) Inspect(ctx context.Context, imageRef string, auth PodAuth) 
 
 	// Multi-arch: OCI image index or Docker manifest list.
 	// ImageIndex() errors on single-arch images (not a manifest list), which is expected.
-	// A non-nil idxErr means either: (a) single-arch image — fall through to image config
-	// path, or (b) transient parse error — also falls through, producing a single-platform
-	// result from the config. Log at debug to distinguish the two cases.
+	// A non-nil idxErr means either: (a) single-arch image, so fall through to the image
+	// config path, or (b) transient parse error, which also falls through and produces a
+	// single-platform result from the config. Log at debug to distinguish the two cases.
 	idx, idxErr := desc.ImageIndex()
 	if idxErr == nil {
 		manifest, err := idx.IndexManifest()
@@ -136,7 +136,7 @@ func (i *Inspector) Inspect(ctx context.Context, imageRef string, auth PodAuth) 
 	return digest, []types.Platform{{OS: cf.OS, Arch: cf.Architecture}}, nil
 }
 
-// pullerFor returns a registry client for auth, building — and caching — one on
+// pullerFor returns a registry client for auth, building (and caching) one on
 // a miss.
 func (i *Inspector) pullerFor(ctx context.Context, auth PodAuth) (*remote.Puller, error) {
 	key := auth.cacheKey()

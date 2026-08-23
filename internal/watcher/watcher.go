@@ -35,7 +35,7 @@ const (
 	maxAttempts    = 5
 	baseRetryDelay = 1 * time.Second
 	maxRetryDelay  = 1 * time.Minute
-	// shortDigestLen is "sha256:" (7 chars) + 12 hex chars — enough to identify a digest in logs.
+	// shortDigestLen is "sha256:" (7 chars) + 12 hex chars, enough to identify a digest in logs.
 	shortDigestLen = 19
 	// workerLabel tags the inspection workers in profiles and tracebacks.
 	workerLabel = "inspect-worker"
@@ -50,7 +50,7 @@ type Inspector interface {
 // Metrics receives inspection outcomes for self-monitoring. It is an
 // interface, not a *collector.SelfMetrics field, so this package does not
 // have to import collector (which already imports store, same as this
-// package — a direct dependency back from here would cycle).
+// package: a direct dependency back from here would cycle).
 type Metrics interface {
 	// ObserveInspection records the outcome and duration of one inspection attempt.
 	ObserveInspection(result string, d time.Duration)
@@ -120,7 +120,7 @@ func (w *Watcher) QueueDepth() int {
 // or cache sync failure). A nil return means the context was cancelled normally.
 func (w *Watcher) Run(ctx context.Context) error {
 	factory := informers.NewSharedInformerFactoryWithOptions(
-		w.client, 0, // no periodic resync — we rely on watch events
+		w.client, 0, // no periodic resync: we rely on watch events
 		informers.WithNamespace(w.namespace),
 	)
 

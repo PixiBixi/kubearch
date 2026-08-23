@@ -74,7 +74,7 @@ func newTestWatcherWithMetrics(s *store.Store, insp Inspector, metrics Metrics) 
 // startWorkers runs the inspection workers for the duration of the test.
 // The shutdown is registered with t.Cleanup rather than deferred because
 // synctest runs cleanups inside the bubble, and a bubble only ends once every
-// goroutine started in it has exited — including the queue's own loops.
+// goroutine started in it has exited, including the queue's own loops.
 func startWorkers(t *testing.T, w *Watcher) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
@@ -88,7 +88,7 @@ func startWorkers(t *testing.T, w *Watcher) {
 // settle blocks until cond holds, advancing the bubble's fake clock one second
 // at a time so rate-limited retries get their turn. synctest.Sleep waits for
 // the watcher to go quiet again after each step, so a passing assertion is
-// never a race — and the whole loop takes no wall-clock time, hence the
+// never a race, and the whole loop takes no wall-clock time, hence the
 // generous budget.
 func settle(t *testing.T, what string, cond func() bool) {
 	t.Helper()
