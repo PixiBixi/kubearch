@@ -14,7 +14,7 @@ commit preceding each change, in a separate git worktree, and comparing with
 [`benchstat`](https://pkg.go.dev/golang.org/x/perf/cmd/benchstat) (6 runs).
 
 Environment: Apple M4, darwin/arm64, Go 1.26. Absolute numbers are
-machine-specific; the ratios and — more importantly — the *shape* of the curves
+machine-specific; the ratios and, more importantly, the *shape* of the curves
 are not.
 
 ## Summary
@@ -28,8 +28,8 @@ are not.
 ## Reverse index in the store
 
 `SetImage` and `RemovePod` answered "is this image still referenced?" by walking
-the whole `podRef → images` map, under the write lock that `Snapshot` — and
-therefore every Prometheus scrape — contends on. An `imageRef → podRefs` index
+the whole `podRef → images` map, under the write lock that `Snapshot` (and
+therefore every Prometheus scrape) contends on. An `imageRef → podRefs` index
 makes the answer a single map lookup.
 
 The percentages matter less than the slope. Before, the cost tracked cluster
@@ -52,7 +52,7 @@ the measurement. The operation itself is well below that.
 
 ### The cost side
 
-`SetPodImages` — the pod-add path — got slower, and that is inherent: it now
+`SetPodImages` (the pod-add path) got slower, and that is inherent: it now
 maintains a second index.
 
 ```text
@@ -61,7 +61,7 @@ SetPodImages/pods=1000  385 ns → 588 ns   (+53%)
 ```
 
 The trade is ~200 ns paid once per pod add, against ~266 ns saved per completed
-inspection and ~724 ns per pod delete at 10k pods — plus the removal of the
+inspection and ~724 ns per pod delete at 10k pods, plus the removal of the
 growth curve. Pod adds and deletes come in equal numbers on a churning cluster,
 so the balance is positive, and the index is a prerequisite for the replace
 semantics that fixed the missed pod-update events.
@@ -114,7 +114,7 @@ after:  1
 
 Extrapolated to a 2000-image cluster start, that is 2000 reads on Secrets and
 ServiceAccounts collapsing to one per distinct `(namespace, service account,
-pull secrets)` tuple — typically one per workload. `singleflight` keeps the
+pull secrets)` tuple, typically one per workload. `singleflight` keeps the
 concurrent misses of a cold start from each triggering their own build.
 
 The cache holds a `remote.Puller`, not just a keychain, so go-containerregistry
@@ -129,7 +129,7 @@ pull secret is picked up on the next retry rather than at the end of the TTL.
 
 - **`Snapshot` copies the whole image set on every scrape.** Returning pointers
   would save ~48 bytes per image, but the copy is what lets the collector emit
-  metrics without holding the store's read lock across channel sends — the lock
+  metrics without holding the store's read lock across channel sends: the lock
   would otherwise be held for the duration of the scrape.
 - **`uniqueImages` allocates a dedup map per pod event.** Pods have a handful of
   containers; a slice-based dedup would be marginally faster but the allocation

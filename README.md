@@ -6,7 +6,7 @@
 
 <img src="scorecard.png" width="100%">
 
-**kubearch** is a Kubernetes Prometheus exporter that reports the CPU architectures supported by every container image running in your cluster — without pulling image layers.
+**kubearch** is a Kubernetes Prometheus exporter that reports the CPU architectures supported by every container image running in your cluster, without pulling image layers.
 
 It reads each pod's image references, fetches the OCI manifest list from the registry, and exposes the supported platforms as Prometheus metrics. Useful for tracking multi-arch readiness, identifying images blocking arm64 migrations, or auditing mixed-architecture clusters.
 
@@ -25,7 +25,7 @@ Registry API (OCI manifest, no layers pulled)
 Prometheus /metrics
 ```
 
-- Watches pod `Add`/`Update`/`Delete` events via a shared informer — **no polling**
+- Watches pod `Add`/`Update`/`Delete` events via a shared informer, **no polling**
 - Inspects each image only **once** (in-memory store, invalidated when the last pod using it is deleted)
 - Reads manifests only, never layers. Multi-arch images need one request; single-arch
   images need a second one for the config blob, which is where the platform is recorded
@@ -48,25 +48,25 @@ The `digest` label mints a new time series every time an image is rebuilt
 under the same tag, which Prometheus never reclaims on its own. Pass
 `-digest-label=false` to drop it from all three families. Note that it buys
 you nothing if your pod specs already pin images by digest
-(`repo:tag@sha256:…`, as GKE does) — the digest is part of the `image` label
+(`repo:tag@sha256:…`, as GKE does): the digest is part of the `image` label
 in that case.
 
 ### Self-monitoring metrics
 
-Without these, a total inspection outage — expired credentials, unreachable
-registry — looks exactly like an empty cluster: the image metrics simply
+Without these, a total inspection outage (expired credentials, unreachable
+registry) looks exactly like an empty cluster: the image metrics simply
 disappear.
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
 | `kubearch_build_info` | Gauge | `version`, `commit`, `go_version` | Always `1`. Build metadata of the running binary. |
 | `kubearch_inspections_total` | Counter | `result` | Inspection attempts, `result` is `success` or `failure`. |
-| `kubearch_inspection_retries_total` | Counter | — | Failed inspections requeued for another attempt. |
-| `kubearch_inspection_duration_seconds` | Histogram | — | Latency of registry calls. |
-| `kubearch_store_images` | Gauge | — | Images with a known result. |
-| `kubearch_store_pending_inspections` | Gauge | — | Inspections in flight. |
-| `kubearch_store_pods` | Gauge | — | Pods currently tracked. |
-| `kubearch_queue_depth` | Gauge | — | Images waiting in the work queue. |
+| `kubearch_inspection_retries_total` | Counter | - | Failed inspections requeued for another attempt. |
+| `kubearch_inspection_duration_seconds` | Histogram | - | Latency of registry calls. |
+| `kubearch_store_images` | Gauge | - | Images with a known result. |
+| `kubearch_store_pending_inspections` | Gauge | - | Inspections in flight. |
+| `kubearch_store_pods` | Gauge | - | Pods currently tracked. |
+| `kubearch_queue_depth` | Gauge | - | Images waiting in the work queue. |
 
 `kubearch_inspections_total` only appears once an inspection has been attempted:
 a Prometheus `CounterVec` exposes nothing until a label value is observed.
@@ -105,7 +105,7 @@ kubearch_image_platform_supported * on (image) group_left()
 Watching the exporter itself:
 
 ```promql
-# Inspection failure ratio — alert above a few percent
+# Inspection failure ratio, alert above a few percent
 sum(rate(kubearch_inspections_total{result="failure"}[15m]))
   / sum(rate(kubearch_inspections_total[15m]))
 
@@ -185,11 +185,11 @@ Pre-built multi-arch images (`linux/amd64`, `linux/arm64`) are published to `ghc
 | `-kubeconfig` | `""` | Path to kubeconfig file (empty = auto-detect) |
 | `-context` | `""` | Kubernetes context to use (empty = current context) |
 | `-digest-label` | `true` | Include the `digest` label on image metrics. Disable to avoid a new time series per image rebuild. |
-| `-version` | — | Print version and exit |
+| `-version` | - | Print version and exit |
 
 ## Standalone mode
 
-kubearch can run outside a cluster against any context in your kubeconfig — useful for local development or one-shot audits.
+kubearch can run outside a cluster against any context in your kubeconfig, useful for local development or one-shot audits.
 
 **Auto-detection**: kubearch tries in-cluster config first. If it fails (i.e. not running inside a pod), it falls back to `~/.kube/config`.
 
@@ -270,7 +270,7 @@ make snapshot
 
 Releases are cut automatically from [Conventional Commits](https://www.conventionalcommits.org/):
 
-1. Push (or merge) commits to `main` — `feat:` bumps the minor, `fix:` the patch,
+1. Push (or merge) commits to `main`: `feat:` bumps the minor, `fix:` the patch,
    a breaking change the minor while the project is still `0.x`. Every other type
    (`chore:`, `docs:`, `ci:`, `perf:`, `refactor:`, `test:`) releases nothing, so
    mark a change with `fix:` if it needs to ship on its own
@@ -283,4 +283,4 @@ Dependency updates are handled by Renovate: minor/patch/digest PRs automerge onc
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

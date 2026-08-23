@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**kubearch** is a Kubernetes Prometheus exporter that reports CPU architectures supported by container images running in a cluster — without pulling image layers. It uses a shared informer (event-driven, no polling) and inspects each image only once via OCI manifest HEAD requests.
+**kubearch** is a Kubernetes Prometheus exporter that reports CPU architectures supported by container images running in a cluster, without pulling image layers. It uses a shared informer (event-driven, no polling) and inspects each image only once via OCI manifest HEAD requests.
 
 ## Commands
 
@@ -42,13 +42,13 @@ watcher → workqueue → workers → store ← collector → Prometheus /metric
                   inspector (registry)   SelfMetrics
 ```
 
-- **`internal/store`** — thread-safe `imageRef → ImageInfo` map with pod reference counting, kept in two directions: `podImages` (podRef → images) and `imagePods` (image → podRefs). The reverse index is what makes every operation independent of cluster size. Key invariant: an image entry exists while at least one pod references it, and is dropped when the last one goes. A `pending` set prevents duplicate concurrent inspections. `Stats()` feeds the self-monitoring gauges.
+- **`internal/store`**: thread-safe `imageRef → ImageInfo` map with pod reference counting, kept in two directions: `podImages` (podRef → images) and `imagePods` (image → podRefs). The reverse index is what makes every operation independent of cluster size. Key invariant: an image entry exists while at least one pod references it, and is dropped when the last one goes. A `pending` set prevents duplicate concurrent inspections. `Stats()` feeds the self-monitoring gauges.
 
-- **`internal/inspector`** — fetches OCI manifests via `go-containerregistry`. Resolves auth through `k8schain` (imagePullSecrets + ServiceAccount pull secrets + anonymous fallback), caching a `remote.Puller` per `(namespace, service account, pull secrets)` for 5 min with `singleflight` on misses and eviction on 401/403. Handles both multi-arch (OCI image index / Docker manifest list) and single-arch images. Only reads manifests — never pulls layers.
+- **`internal/inspector`**: fetches OCI manifests via `go-containerregistry`. Resolves auth through `k8schain` (imagePullSecrets + ServiceAccount pull secrets + anonymous fallback), caching a `remote.Puller` per `(namespace, service account, pull secrets)` for 5 min with `singleflight` on misses and eviction on 401/403. Handles both multi-arch (OCI image index / Docker manifest list) and single-arch images. Only reads manifests, never pulls layers.
 
-- **`internal/watcher`** — Kubernetes shared informer on pods feeding a `client-go` rate-limited workqueue drained by 10 workers. `AddFunc`/`UpdateFunc` call `onPod`, which reconciles the pod's image set; `sameImages` short-circuits the frequent status-only updates. Each attempt runs under a 30 s deadline, failures retry with exponential backoff up to 5 attempts. Workers run under the pprof label `component=inspect-worker`, which Go 1.27 also prints in tracebacks. `DeleteFunc` calls `store.RemovePod` and handles `DeletedFinalStateUnknown`.
+- **`internal/watcher`**: Kubernetes shared informer on pods feeding a `client-go` rate-limited workqueue drained by 10 workers. `AddFunc`/`UpdateFunc` call `onPod`, which reconciles the pod's image set; `sameImages` short-circuits the frequent status-only updates. Each attempt runs under a 30 s deadline, failures retry with exponential backoff up to 5 attempts. Workers run under the pprof label `component=inspect-worker`, which Go 1.27 also prints in tracebacks. `DeleteFunc` calls `store.RemovePod` and handles `DeletedFinalStateUnknown`.
 
-- **`internal/collector`** — two `prometheus.Collector` implementations. `Collector` emits the image families (`kubearch_image_platform_supported`, `_platform_count`, `_multi_arch`) from `store.Snapshot()`, with the `digest` label optional via `WithDigestLabel`. `SelfMetrics` emits the exporter's own health: build info, inspection counters/histogram, and scrape-time gauges for store size and queue depth.
+- **`internal/collector`**: two `prometheus.Collector` implementations. `Collector` emits the image families (`kubearch_image_platform_supported`, `_platform_count`, `_multi_arch`) from `store.Snapshot()`, with the `digest` label optional via `WithDigestLabel`. `SelfMetrics` emits the exporter's own health: build info, inspection counters/histogram, and scrape-time gauges for store size and queue depth.
 
 ## Key Design Decisions
 
@@ -57,22 +57,22 @@ watcher → workqueue → workers → store ← collector → Prometheus /metric
 - **Pod specs are not immutable**: `kubectl set image` rewrites `spec.containers[*].image` and ephemeral containers appear on running pods, which is why `UpdateFunc` exists.
 - **Orphan cleanup**: `store.SetImage` checks that at least one pod still references the image before storing (handles race between inspection and pod deletion).
 - **Bounded everything**: goroutines (worker pool), inspection latency (deadline), retries (max attempts), credential staleness (TTL). See `PERFORMANCE.md` for the measurements behind these choices.
-- **Go version**: requires Go 1.27. The code uses `maps.Values` (1.23), `iter.Seq`/`iter.Pull` (1.23), `WaitGroup.Go` (1.25), and per-iteration loop variable scoping (1.22). The `go` directive is what CI and GoReleaser pin their toolchain to (`go-version-file: go.mod`), so it also decides which runtime the published binary gets — 1.27 brings size-specialized malloc and the `encoding/json` v2 backend, both on the scrape and inspection hot paths.
+- **Go version**: requires Go 1.27. The code uses `maps.Values` (1.23), `iter.Seq`/`iter.Pull` (1.23), `WaitGroup.Go` (1.25), and per-iteration loop variable scoping (1.22). The `go` directive is what CI and GoReleaser pin their toolchain to (`go-version-file: go.mod`), so it also decides which runtime the published binary gets: 1.27 brings size-specialized malloc and the `encoding/json` v2 backend, both on the scrape and inspection hot paths.
 
 ## Testing
 
-Everything in `internal/watcher` that involves the worker pool runs inside a `synctest.Test` bubble: the fake clock makes the queue's retry backoff free to wait out, so the tests exercise the *production* rate limiter instead of a compressed one, and `settle` replaces polling — a passing assertion means the watcher has actually gone quiet, not that a sleep happened to be long enough.
+Everything in `internal/watcher` that involves the worker pool runs inside a `synctest.Test` bubble: the fake clock makes the queue's retry backoff free to wait out, so the tests exercise the *production* rate limiter instead of a compressed one, and `settle` replaces polling: a passing assertion means the watcher has actually gone quiet, not that a sleep happened to be long enough.
 
-Two things a bubble demands: every goroutine started in it must have exited when the test function returns (hence `startWorkers` shutting the queue down via `t.Cleanup`, which synctest runs inside the bubble), and no real network. `TestPodBurst_BoundsGoroutines` stays outside — it reads `runtime.NumGoroutine()`, which is process-wide and would count goroutines the bubble knows nothing about.
+Two things a bubble demands: every goroutine started in it must have exited when the test function returns (hence `startWorkers` shutting the queue down via `t.Cleanup`, which synctest runs inside the bubble), and no real network. `TestPodBurst_BoundsGoroutines` stays outside: it reads `runtime.NumGoroutine()`, which is process-wide and would count goroutines the bubble knows nothing about.
 
-`internal/inspector` keeps real `httptest.NewServer` instances. `httptest.NewTestServer` (Go 1.27) is only reachable through its own `Server.Client`, and the inspector deliberately builds its own `remote.Puller` with go-containerregistry's transport — wiring a transport override into production code just to make the tests in-memory is not a trade worth making.
+`internal/inspector` keeps real `httptest.NewServer` instances. `httptest.NewTestServer` (Go 1.27) is only reachable through its own `Server.Client`, and the inspector deliberately builds its own `remote.Puller` with go-containerregistry's transport. Wiring a transport override into production code just to make the tests in-memory is not a trade worth making.
 
 ## CI
 
 All workflows live in `.github/workflows/`, actions are pinned by SHA:
 
 - **CI** (`ci.yml`): `go mod verify`, build, `go test -race`
-- **Lint** (`lint.yml`): golangci-lint v2.13.1 against `.golangci.yml`. Its `modernize` linter is gated on the module's `go` directive, so raising that directive can turn previously silent rewrites into build failures — run `go fix -diff ./...` after any bump.
+- **Lint** (`lint.yml`): golangci-lint v2.13.1 against `.golangci.yml`. Its `modernize` linter is gated on the module's `go` directive, so raising that directive can turn previously silent rewrites into build failures. Run `go fix -diff ./...` after any bump.
 - **github-actions** (`github-actions.yml`): zizmor audit of the workflows, SARIF to code scanning
 - **govulncheck** (`govulncheck.yml`): reachable vulnerabilities in dependencies
 - **Go format** / **markdownlint**: reviewdog inline suggestions on PRs
@@ -80,9 +80,9 @@ All workflows live in `.github/workflows/`, actions are pinned by SHA:
 
 ## Release
 
-Automatic on push to `main` — [`svu`](https://github.com/caarlos0/svu) computes the next `vX.Y.Z` from the conventional commits since the last tag, the workflow creates the tag through the API, then GoReleaser and the Helm chart push run in the same job. Manual `v*` tag push still works as an escape hatch.
+Automatic on push to `main`: [`svu`](https://github.com/caarlos0/svu) computes the next `vX.Y.Z` from the conventional commits since the last tag, the workflow creates the tag through the API, then GoReleaser and the Helm chart push run in the same job. Manual `v*` tag push still works as an escape hatch.
 
-Only `feat:` (minor) and `fix:` (patch) cut a release; `--v0` keeps a breaking change from jumping to `v1.0.0` while the project is pre-1.0. **`perf:` does not release** — svu follows the Conventional Commits spec, where only `fix` and `feat` are normative. Use `fix:` if a change must ship on its own.
+Only `feat:` (minor) and `fix:` (patch) cut a release; `--v0` keeps a breaking change from jumping to `v1.0.0` while the project is pre-1.0. **`perf:` does not release**: svu follows the Conventional Commits spec, where only `fix` and `feat` are normative. Use `fix:` if a change must ship on its own.
 
 Renovate drives dependency releases: gomod minor → `feat(deps)` (minor), patch/digest → `fix(deps)` (patch), github-actions and dockerfile → `chore(deps)` (no release). Minor/patch/digest PRs automerge once CI is green.
 
