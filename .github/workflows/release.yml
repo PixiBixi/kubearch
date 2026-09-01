@@ -6,13 +6,14 @@ on:
     tags:
       - 'v*'
 
-permissions:
-  contents: write
-  packages: write  # required to push to ghcr.io
+permissions: {}
 
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write  # required to push to ghcr.io
     steps:
       # audit, not block: this job's egress (goreleaser uploads, the OCI
       # registry push) moves with every dependency, and a stale allowlist
