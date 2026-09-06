@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: reviewdog/action-markdownlint@3ada8babcda166021650568fe477cda59c7266bf # v0.28.1
+      - uses: reviewdog/action-markdownlint@8a6529a4b8ffbb3193a55a255bedd31989a67fc2 # v0.29.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           reporter: github-pr-review
