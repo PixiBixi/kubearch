@@ -44,7 +44,7 @@ watcher → workqueue → workers → store ← collector → Prometheus /metric
 
 - **`internal/store`**: thread-safe `imageRef → ImageInfo` map with pod reference counting, kept in two directions: `podImages` (podRef → images) and `imagePods` (image → podRefs). The reverse index is what makes every operation independent of cluster size. Key invariant: an image entry exists while at least one pod references it, and is dropped when the last one goes. A `pending` set prevents duplicate concurrent inspections. `Stats()` feeds the self-monitoring gauges.
 
-- **`internal/inspector`**: fetches OCI manifests via `go-containerregistry`. Resolves auth through `k8schain` (imagePullSecrets + ServiceAccount pull secrets + anonymous fallback), caching a `remote.Puller` per `(namespace, service account, pull secrets)` for 5 min with `singleflight` on misses and eviction on 401/403. Handles both multi-arch (OCI image index / Docker manifest list) and single-arch images. Only reads manifests, never pulls layers.
+- **`internal/inspector`**: fetches OCI manifests via `go-containerregistry`. Resolves auth through `go-containerregistry/pkg/authn/kubernetes` (imagePullSecrets + ServiceAccount pull secrets + anonymous fallback; replaced the older `k8schain` package), caching a `remote.Puller` per `(namespace, service account, pull secrets)` for 5 min with `singleflight` on misses and eviction on 401/403. Handles both multi-arch (OCI image index / Docker manifest list) and single-arch images. Only reads manifests, never pulls layers.
 
 - **`internal/watcher`**: Kubernetes shared informer on pods feeding a `client-go` rate-limited workqueue drained by 10 workers. `AddFunc`/`UpdateFunc` call `onPod`, which reconciles the pod's image set; `sameImages` short-circuits the frequent status-only updates. Each attempt runs under a 30 s deadline, failures retry with exponential backoff up to 5 attempts. Workers run under the pprof label `component=inspect-worker`, which Go 1.27 also prints in tracebacks. `DeleteFunc` calls `store.RemovePod` and handles `DeletedFinalStateUnknown`.
 
@@ -72,9 +72,12 @@ Two things a bubble demands: every goroutine started in it must have exited when
 All workflows live in `.github/workflows/`, actions are pinned by SHA:
 
 - **CI** (`ci.yml`): `go mod verify`, build, `go test -race`
-- **Lint** (`lint.yml`): golangci-lint v2.13.1 against `.golangci.yml`. Its `modernize` linter is gated on the module's `go` directive, so raising that directive can turn previously silent rewrites into build failures. Run `go fix -diff ./...` after any bump.
+- **Lint** (`lint.yml`): golangci-lint v2.13.2 against `.golangci.yml`. Its `modernize` linter is gated on the module's `go` directive, so raising that directive can turn previously silent rewrites into build failures. Run `go fix -diff ./...` after any bump.
 - **github-actions** (`github-actions.yml`): zizmor audit of the workflows, SARIF to code scanning
 - **govulncheck** (`govulncheck.yml`): reachable vulnerabilities in dependencies
+- **CodeQL** (`codeql.yml`) / **Scorecard** (`scorecard.yml`): weekly plus push/PR security analysis, SARIF and OSSF score to code scanning
+- **Dependency review** (`dependency-review.yml`): blocks high-severity or copyleft (GPL/AGPL) dependencies on PRs; since Renovate automerges, this is the last human-visible gate
+- **Validate PR title** (`validate-pr-title.yml`): enforces Conventional Commits on the PR title. A squash merge takes the title as its commit message, so a non-conforming title makes `svu` see nothing releasable and the release is skipped silently
 - **Go format** / **markdownlint**: reviewdog inline suggestions on PRs
 - **Release** (`release.yml`): see below
 
@@ -86,4 +89,4 @@ Only `feat:` (minor) and `fix:` (patch) cut a release; `--v0` keeps a breaking c
 
 Renovate drives dependency releases: gomod minor → `feat(deps)` (minor), patch/digest → `fix(deps)` (patch), github-actions and dockerfile → `chore(deps)` (no release). Minor/patch/digest PRs automerge once CI is green.
 
-GoReleaser (`.goreleaser.yml`) builds `linux/amd64` and `linux/arm64` binaries and, via ko, pushes multi-arch images to `ghcr.io/PixiBixi/kubearch`; the Helm chart goes to `ghcr.io/pixibixi/kubearch/charts`. Version/commit/date are injected via ldflags into `main.version`, `main.commit`, `main.date`.
+GoReleaser (`.goreleaser.yml`) builds `linux`/`darwin` × `amd64`/`arm64` archives (same matrix as `make build-all`) and, via ko, pushes `linux/amd64` + `linux/arm64` multi-arch images to `ghcr.io/PixiBixi/kubearch`; the Helm chart goes to `ghcr.io/pixibixi/kubearch/charts`. Version/commit/date are injected via ldflags into `main.version`, `main.commit`, `main.date`. `charts/kubearch/Chart.yaml`'s `version`/`appVersion` are placeholders: the release job overrides both with `--version`/`--app-version` from the git tag, so don't bump them by hand.
