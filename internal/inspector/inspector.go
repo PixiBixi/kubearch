@@ -75,7 +75,7 @@ func New(k8sClient kubernetes.Interface, logger *slog.Logger) *Inspector {
 }
 
 // Inspect returns the digest and list of supported platforms for imageRef.
-// Auth is resolved via k8schain (imagePullSecrets + service account + anonymous fallback).
+// Auth is resolved via authn/kubernetes (imagePullSecrets + service account + anonymous fallback).
 func (i *Inspector) Inspect(ctx context.Context, imageRef string, auth PodAuth) (digest string, platforms []types.Platform, err error) {
 	ref, err := name.ParseReference(imageRef)
 	if err != nil {
