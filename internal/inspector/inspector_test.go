@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -24,6 +25,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
+
+	"github.com/PixiBixi/kubearch/internal/types"
 )
 
 func TestNew(t *testing.T) {
@@ -159,6 +162,102 @@ func TestInspect_SingleArch(t *testing.T) {
 	}
 	if platforms[0].OS != "linux" || platforms[0].Arch != "amd64" {
 		t.Errorf("unexpected platform: %+v", platforms[0])
+	}
+}
+
+func TestInspect_KeepsVariants(t *testing.T) {
+	host := startTestRegistry(t)
+
+	var adds []mutate.IndexAddendum
+	for _, p := range []v1.Platform{
+		{OS: "linux", Architecture: "arm", Variant: "v6"},
+		{OS: "linux", Architecture: "arm", Variant: "v7"},
+		{OS: "linux", Architecture: "arm", Variant: "v7"}, // duplicate entry
+		{OS: "linux", Architecture: "amd64"},
+	} {
+		img, err := random.Image(256, 1)
+		if err != nil {
+			t.Fatalf("random.Image: %v", err)
+		}
+		adds = append(adds, mutate.IndexAddendum{Add: img, Platform: &p})
+	}
+	imageRef := host + "/test/variants:latest"
+	ref, err := name.ParseReference(imageRef, name.Insecure)
+	if err != nil {
+		t.Fatalf("ParseReference: %v", err)
+	}
+	if err := remote.WriteIndex(ref, mutate.AppendManifests(empty.Index, adds...)); err != nil {
+		t.Fatalf("WriteIndex: %v", err)
+	}
+
+	_, platforms, err := newTestInspector(t, fake.NewClientset()).Inspect(context.Background(), imageRef, PodAuth{})
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	want := []types.Platform{
+		{OS: "linux", Arch: "arm", Variant: "v6"},
+		{OS: "linux", Arch: "arm", Variant: "v7"},
+		{OS: "linux", Arch: "amd64"},
+	}
+	if !slices.Equal(platforms, want) {
+		t.Errorf("platforms = %+v, want %+v", platforms, want)
+	}
+}
+
+func TestInspect_SingleArchVariant(t *testing.T) {
+	host := startTestRegistry(t)
+
+	img, err := random.Image(256, 1)
+	if err != nil {
+		t.Fatalf("random.Image: %v", err)
+	}
+	img, err = mutate.ConfigFile(img, &v1.ConfigFile{OS: "linux", Architecture: "arm64", Variant: "v8"})
+	if err != nil {
+		t.Fatalf("mutate.ConfigFile: %v", err)
+	}
+	imageRef := host + "/test/single-variant:latest"
+	ref, err := name.ParseReference(imageRef, name.Insecure)
+	if err != nil {
+		t.Fatalf("ParseReference: %v", err)
+	}
+	if err := remote.Write(ref, img); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	_, platforms, err := newTestInspector(t, fake.NewClientset()).Inspect(context.Background(), imageRef, PodAuth{})
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if want := []types.Platform{{OS: "linux", Arch: "arm64", Variant: "v8"}}; !slices.Equal(platforms, want) {
+		t.Errorf("platforms = %+v, want %+v", platforms, want)
+	}
+}
+
+// An index holding only attestations would otherwise be stored with zero
+// platforms, which the metrics would report as a single-arch image.
+func TestInspect_IndexWithoutPlatformsFails(t *testing.T) {
+	host := startTestRegistry(t)
+
+	img, err := random.Image(256, 1)
+	if err != nil {
+		t.Fatalf("random.Image: %v", err)
+	}
+	idx := mutate.AppendManifests(empty.Index, mutate.IndexAddendum{
+		Add:      img,
+		Platform: &v1.Platform{OS: "unknown", Architecture: "unknown"},
+	})
+	imageRef := host + "/test/attestations-only:latest"
+	ref, err := name.ParseReference(imageRef, name.Insecure)
+	if err != nil {
+		t.Fatalf("ParseReference: %v", err)
+	}
+	if err := remote.WriteIndex(ref, idx); err != nil {
+		t.Fatalf("WriteIndex: %v", err)
+	}
+
+	_, platforms, err := newTestInspector(t, fake.NewClientset()).Inspect(context.Background(), imageRef, PodAuth{})
+	if err == nil {
+		t.Errorf("Inspect = %v, nil error; want an error for an index with no platform", platforms)
 	}
 }
 

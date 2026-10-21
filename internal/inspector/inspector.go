@@ -118,11 +118,15 @@ func (i *Inspector) Inspect(ctx context.Context, imageRef string, auth PodAuth) 
 			if m.Platform == nil || m.Platform.OS == "" || m.Platform.OS == "unknown" {
 				continue // skip attestation blobs and malformed entries
 			}
-			p := types.Platform{OS: m.Platform.OS, Arch: m.Platform.Architecture}
+			p := types.Platform{OS: m.Platform.OS, Arch: m.Platform.Architecture, Variant: m.Platform.Variant}
 			if _, ok := seen[p]; !ok {
 				seen[p] = struct{}{}
 				platforms = append(platforms, p)
 			}
+		}
+		if len(platforms) == 0 {
+			// Stored as is, it would read as a single-arch image in the metrics.
+			return "", nil, errors.New("image index lists no platform")
 		}
 		return digest, platforms, nil
 	}
@@ -137,7 +141,7 @@ func (i *Inspector) Inspect(ctx context.Context, imageRef string, auth PodAuth) 
 	if err != nil {
 		return "", nil, fmt.Errorf("get config file: %w", err)
 	}
-	return digest, []types.Platform{{OS: cf.OS, Arch: cf.Architecture}}, nil
+	return digest, []types.Platform{{OS: cf.OS, Arch: cf.Architecture, Variant: cf.Variant}}, nil
 }
 
 // pullerFor returns a registry client for auth, building (and caching) one on
