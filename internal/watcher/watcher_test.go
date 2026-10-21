@@ -322,6 +322,32 @@ func TestInspect_GivesUpAfterMaxAttempts(t *testing.T) {
 	})
 }
 
+// A queued image whose auth entry is gone (a pod event racing the worker's
+// cleanup) must not stay pending forever, or no later pod could re-trigger it.
+func TestInspect_MissingAuthClearsPending(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		w := newTestWatcher(s, &fakeInspector{
+			fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+				return "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+			},
+		})
+		startWorkers(t, w)
+
+		// The state the race leaves behind: pending in the store, no auth.
+		s.SetPodImages("default/pod1", []string{"orphan:image"})
+		w.queue.Add("orphan:image")
+
+		settle(t, "pending to be cleared", func() bool {
+			_, pending, _ := s.Stats()
+			return pending == 0
+		})
+
+		w.onPod(makePod("default", "pod2", "orphan:image"))
+		settle(t, "the image to be inspected", func() bool { return len(s.Snapshot()) == 1 })
+	})
+}
+
 // A registry that accepts the connection and never answers must not pin a
 // worker: every inspection runs under a deadline.
 func TestInspect_AppliesTimeout(t *testing.T) {

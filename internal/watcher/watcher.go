@@ -212,16 +212,18 @@ func (w *Watcher) processNext(ctx context.Context) bool {
 	case ctx.Err() != nil:
 		// Shutting down: drop the item without burning a retry.
 		w.queue.Forget(imageRef)
-		w.store.FailImage(imageRef)
 		w.forgetAuth(imageRef)
+		w.store.FailImage(imageRef)
 
 	case w.queue.NumRequeues(imageRef)+1 >= maxAttempts:
 		w.logger.Error("inspection failed, giving up",
 			"image", imageRef, "attempts", maxAttempts, "err", err)
 		w.queue.Forget(imageRef)
+		// Auth goes before pending: in the other order a pod re-queuing the image
+		// in between loses its auth and the image stays pending forever.
+		w.forgetAuth(imageRef)
 		// Clearing pending lets a later pod event re-trigger the image.
 		w.store.FailImage(imageRef)
-		w.forgetAuth(imageRef)
 
 	default:
 		w.logger.Warn("inspection failed, retrying",
@@ -236,7 +238,10 @@ func (w *Watcher) processNext(ctx context.Context) bool {
 func (w *Watcher) inspect(ctx context.Context, imageRef string) error {
 	auth, ok := w.authFor(imageRef)
 	if !ok {
-		return nil // no longer tracked: the image was resolved or dropped meanwhile
+		// No longer tracked: resolved or dropped meanwhile. Clear pending anyway
+		// so a stray queue entry can never pin the image (no-op if already clear).
+		w.store.FailImage(imageRef)
+		return nil
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, inspectTimeout)
@@ -250,8 +255,8 @@ func (w *Watcher) inspect(ctx context.Context, imageRef string) error {
 	}
 	w.metrics.ObserveInspection("success", time.Since(start))
 
-	w.store.SetImage(imageRef, digest, platforms)
 	w.forgetAuth(imageRef)
+	w.store.SetImage(imageRef, digest, platforms)
 	w.logger.Info("inspection done",
 		"image", imageRef,
 		"digest", shortDigest(digest),
