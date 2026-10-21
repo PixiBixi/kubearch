@@ -1,61 +1,132 @@
 # kubearch
 
-![Go version](https://img.shields.io/badge/go-1.27-blue)
-![License](https://img.shields.io/github/license/PixiBixi/kubearch)
-![Docker](https://img.shields.io/badge/ghcr.io-PixiBixi%2Fkubearch-blue)
+Prometheus exporter that reports the CPU architectures of the container images running in your Kubernetes cluster, without pulling a single layer.
 
-<img src="scorecard.png" width="100%">
+[![CI](https://github.com/PixiBixi/kubearch/actions/workflows/ci.yml/badge.svg)](https://github.com/PixiBixi/kubearch/actions/workflows/ci.yml)
+[![Lint](https://github.com/PixiBixi/kubearch/actions/workflows/lint.yml/badge.svg)](https://github.com/PixiBixi/kubearch/actions/workflows/lint.yml)
+[![Release](https://img.shields.io/github/v/release/PixiBixi/kubearch)](https://github.com/PixiBixi/kubearch/releases/latest)
+[![Go version](https://img.shields.io/github/go-mod/go-version/PixiBixi/kubearch)](go.mod)
+[![License](https://img.shields.io/github/license/PixiBixi/kubearch)](LICENSE)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/PixiBixi/kubearch/badge)](https://scorecard.dev/viewer/?uri=github.com/PixiBixi/kubearch)
 
-**kubearch** is a Kubernetes Prometheus exporter that reports the CPU architectures supported by every container image running in your cluster, without pulling image layers.
+## Why kubearch
 
-It reads each pod's image references, fetches the OCI manifest list from the registry, and exposes the supported platforms as Prometheus metrics. Useful for tracking multi-arch readiness, identifying images blocking arm64 migrations, or auditing mixed-architecture clusters.
+- Track multi-arch readiness across every namespace.
+- Find the images that block an arm64 migration.
+- Audit mixed-architecture clusters.
+- Event-driven: a shared informer watches pods, there is no polling.
+- Each image is inspected once, through OCI manifest requests only, never layers.
+- Works with public registries (Docker Hub, ghcr.io, gcr.io, ECR, ACR, ...) and private ones, using the pods' own pull secrets.
 
-## How it works
+## Quick start
 
-```text
-K8s API (pod watch)
-      │
-      ▼  new image detected
-work queue (10 workers, dedup, retry with backoff)
-      │
-      ▼
-Registry API (OCI manifest, no layers pulled)
-      │
-      ▼
-Prometheus /metrics
+```bash
+helm upgrade --install kubearch oci://ghcr.io/pixibixi/kubearch/charts/kubearch \
+  --namespace monitoring \
+  --create-namespace
 ```
 
-- Watches pod `Add`/`Update`/`Delete` events via a shared informer, **no polling**
-- Inspects each image only **once** (in-memory store, invalidated when the last pod using it is deleted)
-- Reads manifests only, never layers. Multi-arch images need one request; single-arch
-  images need a second one for the config blob, which is where the platform is recorded
-- Bounded work: 10 concurrent inspections, a 30 s deadline per attempt, and 5 retries
-  with exponential backoff before an image is dropped
-- Authenticates via `imagePullSecrets` and service account pull secrets, with anonymous
-  fallback. Credentials are cached for 5 min per `(namespace, service account, pull secrets)`
-  and evicted on `401`/`403`, so a rotated secret is picked up on the next attempt
-- Supports public registries (Docker Hub, ghcr.io, gcr.io, ECR, ACR, ...) and private ones
+Metrics are served on port `9101` at `/metrics`. `/healthz` is a liveness check (200 once the process is up). `/readyz` returns 200 once the pod informer cache has synced, 503 before.
+
+## Installation
+
+### Helm
+
+```bash
+# Cluster-wide, with a Prometheus Operator ServiceMonitor
+helm upgrade --install kubearch oci://ghcr.io/pixibixi/kubearch/charts/kubearch \
+  --namespace monitoring \
+  --create-namespace \
+  --set serviceMonitor.enabled=true \
+  --set serviceMonitor.labels.release=kube-prometheus-stack
+
+# Restricted to a single namespace (namespace-scoped Role instead of ClusterRole)
+helm upgrade --install kubearch oci://ghcr.io/pixibixi/kubearch/charts/kubearch \
+  --namespace monitoring \
+  --create-namespace \
+  --set watchNamespace=production
+```
+
+| Value | Default | Description |
+| --- | --- | --- |
+| `image.repository` | `ghcr.io/PixiBixi/kubearch` | Container image repository |
+| `image.tag` | `""` (chart appVersion) | Image tag |
+| `image.pullPolicy` | `IfNotPresent` | Image pull policy |
+| `watchNamespace` | `""` | Namespace to watch. Empty watches all namespaces (ClusterRole). |
+| `extraArgs` | `[]` | Extra CLI flags for the container, e.g. `["-digest-label=false"]` |
+| `serviceAccount.create` | `true` | Create a dedicated ServiceAccount |
+| `serviceAccount.annotations` | `{}` | ServiceAccount annotations (e.g. Workload Identity) |
+| `rbac.create` | `true` | Create the Role or ClusterRole and its binding |
+| `rbac.pullSecrets` | `true` | Grant `get` on `secrets` and `serviceaccounts` to resolve pull secrets. `false` means anonymous registry access only. |
+| `serviceMonitor.enabled` | `false` | Create a Prometheus Operator ServiceMonitor |
+| `serviceMonitor.interval` | `60s` | Scrape interval |
+| `serviceMonitor.labels` | `{}` | Extra ServiceMonitor labels, to match your Prometheus selector |
+| `resources.requests.cpu` | `10m` | CPU request |
+| `resources.requests.memory` | `64Mi` | Memory request |
+| `resources.limits.memory` | `256Mi` | Memory limit |
+| `nodeSelector` | `{}` | Node selector |
+| `tolerations` | `[]` | Tolerations |
+| `affinity` | `{}` | Affinity rules |
+
+### Container image
+
+Multi-arch images (`linux/amd64`, `linux/arm64`) are published to `ghcr.io/PixiBixi/kubearch`.
+
+### Binaries
+
+Archives for `linux` and `darwin` on `amd64` and `arm64` are attached to each [GitHub release](https://github.com/PixiBixi/kubearch/releases).
+
+### RBAC
+
+| API group | Resources | Verbs | Used for |
+| --- | --- | --- | --- |
+| `""` | `pods` | `get`, `list`, `watch` | Discovering the images in use |
+| `""` | `secrets`, `serviceaccounts` | `get` | Resolving `imagePullSecrets` and ServiceAccount pull secrets |
+
+The `secrets` and `serviceaccounts` rule is dropped when `rbac.pullSecrets=false`. The chart grants these through a `ClusterRole`, or a namespace-scoped `Role` when `watchNamespace` is set.
+
+## Configuration
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `-listen-address` | `:9101` | Address to expose Prometheus metrics on |
+| `-namespace` | `""` | Kubernetes namespace to watch (empty = all namespaces) |
+| `-kubeconfig` | `""` | Path to kubeconfig file (empty = auto-detect) |
+| `-context` | `""` | Kubernetes context to use (empty = current context) |
+| `-digest-label` | `true` | Include the `digest` label on image metrics. Disable to avoid a new time series per image rebuild of the same tag. |
+| `-reinspect-interval` | `0` | Re-inspect known images this often to follow mutable tags (0 = inspect each image once) |
+| `-version` | - | Print version information and exit |
+
+### Running outside a cluster
+
+kubearch tries the in-cluster config first and falls back to your kubeconfig, which is handy for local development and one-shot audits.
+
+```bash
+# Current kubectl context
+./kubearch
+
+# Specific context, one namespace
+./kubearch --context=prod-cluster --namespace=kube-system
+
+# Explicit kubeconfig
+./kubearch --kubeconfig=/path/to/config --context=staging
+```
+
+### Private registries
+
+Credentials are resolved from the pod's `imagePullSecrets`, then its ServiceAccount pull secrets, then anonymously. No extra configuration is needed when the pod spec already has valid pull secrets.
 
 ## Metrics
 
+Image metrics:
+
 | Metric | Type | Labels | Description |
-|---|---|---|---|
-| `kubearch_image_platform_supported` | Gauge | `image`, `digest`, `os`, `arch` | Always `1`. One time series per supported platform. |
-| `kubearch_image_platform_count` | Gauge | `image`, `digest` | Total number of platforms the image supports. |
+| --- | --- | --- | --- |
+| `kubearch_image_platform_supported` | Gauge | `image`, `digest`, `os`, `arch`, `variant` | Always `1`. One series per supported platform. `variant` is empty when the platform has none (e.g. `v7` on `linux/arm`). |
+| `kubearch_image_platform_count` | Gauge | `image`, `digest` | Number of platforms the image supports. |
 | `kubearch_image_multi_arch` | Gauge | `image`, `digest` | `1` if the image supports more than one platform, `0` otherwise. |
 
-The `digest` label mints a new time series every time an image is rebuilt
-under the same tag, which Prometheus never reclaims on its own. Pass
-`-digest-label=false` to drop it from all three families. Note that it buys
-you nothing if your pod specs already pin images by digest
-(`repo:tag@sha256:…`, as GKE does): the digest is part of the `image` label
-in that case.
-
-### Self-monitoring metrics
-
-Without these, a total inspection outage (expired credentials, unreachable
-registry) looks exactly like an empty cluster: the image metrics simply
-disappear.
+Exporter self-monitoring metrics:
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
@@ -68,24 +139,24 @@ disappear.
 | `kubearch_store_pods` | Gauge | - | Pods currently tracked. |
 | `kubearch_queue_depth` | Gauge | - | Images waiting in the work queue. |
 
-`kubearch_inspections_total` only appears once an inspection has been attempted:
-a Prometheus `CounterVec` exposes nothing until a label value is observed.
+Notes:
 
-### Example output
+- `kubearch_inspections_total` appears only after the first inspection attempt.
+- The `digest` label creates a new series whenever an image is rebuilt under the same tag. Pass `-digest-label=false` to drop it. It changes nothing if your pods already pin images by digest (`repo:tag@sha256:...`), because the digest is then part of the `image` label.
+
+Example output:
 
 ```text
-kubearch_image_platform_supported{arch="amd64",digest="sha256:abc…",image="nginx:1.27",os="linux"} 1
-kubearch_image_platform_supported{arch="arm64",digest="sha256:abc…",image="nginx:1.27",os="linux"} 1
-kubearch_image_platform_supported{arch="arm",digest="sha256:abc…",image="nginx:1.27",os="linux"}   1
-
-kubearch_image_platform_count{digest="sha256:abc…",image="nginx:1.27"} 3
-kubearch_image_multi_arch{digest="sha256:abc…",image="nginx:1.27"}     1
+kubearch_image_platform_supported{arch="amd64",digest="sha256:abc...",image="nginx:1.27",os="linux",variant=""} 1
+kubearch_image_platform_supported{arch="arm64",digest="sha256:abc...",image="nginx:1.27",os="linux",variant=""} 1
+kubearch_image_platform_count{digest="sha256:abc...",image="nginx:1.27"} 2
+kubearch_image_multi_arch{digest="sha256:abc...",image="nginx:1.27"} 1
 ```
 
-### Useful PromQL queries
+## Example queries
 
 ```promql
-# Images that support only one platform (single-arch)
+# Single-arch images
 kubearch_image_multi_arch == 0
 
 # Images without linux/arm64 support (arm64 migration blockers)
@@ -93,11 +164,10 @@ group by (image, digest) (kubearch_image_platform_count)
   unless on (image, digest)
   (kubearch_image_platform_supported{os="linux", arch="arm64"})
 
-# Number of platforms per image, sorted
+# Platforms per image, highest first
 sort_desc(kubearch_image_platform_count)
 
-# All platforms supported by images in a specific namespace
-# (requires joining with kube_pod_container_info from kube-state-metrics)
+# Platforms of the images running in one namespace (needs kube-state-metrics)
 kubearch_image_platform_supported * on (image) group_left()
   kube_pod_container_info{namespace="production"}
 ```
@@ -105,181 +175,32 @@ kubearch_image_platform_supported * on (image) group_left()
 Watching the exporter itself:
 
 ```promql
-# Inspection failure ratio, alert above a few percent
+# Inspection failure ratio
 sum(rate(kubearch_inspections_total{result="failure"}[15m]))
   / sum(rate(kubearch_inspections_total[15m]))
 
-# Images the exporter never managed to resolve (queue drained, nothing pending)
+# Pods tracked but no image ever resolved
 kubearch_store_pods > 0 and kubearch_store_images == 0
 
-# Backlog not draining: registry unreachable or rate-limiting us
+# Backlog not draining: registry unreachable or rate-limiting
 kubearch_queue_depth > 0 and rate(kubearch_inspection_retries_total[10m]) > 0
 
 # p99 registry latency
 histogram_quantile(0.99, sum by (le) (rate(kubearch_inspection_duration_seconds_bucket[15m])))
 ```
 
-## Installation
-
-### Helm (recommended)
-
-```bash
-helm upgrade --install kubearch oci://ghcr.io/PixiBixi/kubearch/charts/kubearch \
-  --namespace monitoring \
-  --create-namespace
-```
-
-With Prometheus Operator (kube-prometheus-stack):
-
-```bash
-helm upgrade --install kubearch oci://ghcr.io/PixiBixi/kubearch/charts/kubearch \
-  --namespace monitoring \
-  --create-namespace \
-  --set serviceMonitor.enabled=true \
-  --set serviceMonitor.labels.release=kube-prometheus-stack
-```
-
-Restricted to a single namespace:
-
-```bash
-helm upgrade --install kubearch oci://ghcr.io/PixiBixi/kubearch/charts/kubearch \
-  --namespace monitoring \
-  --create-namespace \
-  --set watchNamespace=production
-```
-
-> When `watchNamespace` is set, a namespace-scoped `Role` is created instead of a `ClusterRole`.
-
-### Docker image
-
-Pre-built multi-arch images (`linux/amd64`, `linux/arm64`) are published to `ghcr.io/PixiBixi/kubearch`.
-
-## Helm values
-
-| Parameter | Default | Description |
-|---|---|---|
-| `image.repository` | `ghcr.io/PixiBixi/kubearch` | Container image repository |
-| `image.tag` | `""` (chart appVersion) | Image tag |
-| `image.pullPolicy` | `IfNotPresent` | Image pull policy |
-| `watchNamespace` | `""` | Namespace to watch. Empty = all namespaces (ClusterRole). Set = namespace-scoped Role. |
-| `extraArgs` | `[]` | Extra CLI flags for the container, e.g. `["-digest-label=false"]` |
-| `serviceAccount.create` | `true` | Create a dedicated ServiceAccount |
-| `serviceAccount.annotations` | `{}` | Annotations for the ServiceAccount (e.g. Workload Identity) |
-| `rbac.create` | `true` | Create the required Role/ClusterRole and binding |
-| `serviceMonitor.enabled` | `false` | Create a Prometheus Operator ServiceMonitor |
-| `serviceMonitor.interval` | `60s` | Scrape interval (data changes on pod events, 60s is enough) |
-| `serviceMonitor.labels` | `{}` | Extra labels for the ServiceMonitor (to match your Prometheus selector) |
-| `resources.requests.cpu` | `10m` | CPU request |
-| `resources.requests.memory` | `64Mi` | Memory request |
-| `resources.limits.memory` | `256Mi` | Memory limit |
-| `nodeSelector` | `{}` | Node selector |
-| `tolerations` | `[]` | Tolerations |
-| `affinity` | `{}` | Affinity rules |
-
-## CLI flags
-
-| Flag | Default | Description |
-|---|---|---|
-| `-listen-address` | `:9101` | Address to expose Prometheus metrics on |
-| `-namespace` | `""` | Kubernetes namespace to watch (empty = all) |
-| `-kubeconfig` | `""` | Path to kubeconfig file (empty = auto-detect) |
-| `-context` | `""` | Kubernetes context to use (empty = current context) |
-| `-digest-label` | `true` | Include the `digest` label on image metrics. Disable to avoid a new time series per image rebuild. |
-| `-version` | - | Print version and exit |
-
-## Standalone mode
-
-kubearch can run outside a cluster against any context in your kubeconfig, useful for local development or one-shot audits.
-
-**Auto-detection**: kubearch tries in-cluster config first. If it fails (i.e. not running inside a pod), it falls back to `~/.kube/config`.
-
-```bash
-# Use current kubectl context
-./kubearch
-
-# Target a specific context
-./kubearch --context=prod-cluster
-
-# Restrict to one namespace in a specific context
-./kubearch --context=prod-cluster --namespace=kube-system
-
-# Explicit kubeconfig path
-./kubearch --kubeconfig=/path/to/config --context=staging
-```
-
-The startup log tells you which mode is active:
-
-```text
-level=INFO msg="config: in-cluster"
-# or
-level=INFO msg="config: kubeconfig" context=current
-```
-
-## Private registries
-
-kubearch resolves credentials automatically from:
-
-1. The pod's `imagePullSecrets`
-2. The pod's ServiceAccount pull secrets
-3. Anonymous (public images)
-
-No additional configuration is needed as long as the pod spec already has valid pull secrets.
-
 ## Development
 
-```bash
-# Build for current platform
-make build
+| Command | Description |
+| --- | --- |
+| `make build` | Build for the current platform |
+| `make build-all` | Build `linux` and `darwin` on `amd64` and `arm64` |
+| `make test` | `go test -race ./...` |
+| `make lint` | `golangci-lint run ./...` |
+| `make docker` | Build a local Docker image |
+| `make snapshot` | GoReleaser dry-run |
 
-# Run locally against current kubectl context
-./kubearch --namespace=default
-
-# Test and lint
-make test
-make lint
-
-# Benchmarks (see PERFORMANCE.md for the recorded numbers)
-go test -run='^$' -bench=. ./internal/store/
-
-# Docker image (local)
-make docker
-
-# GoReleaser dry-run
-make snapshot
-```
-
-### Project structure
-
-```text
-.
-├── main.go                         # entry point, flags, wiring
-├── internal/
-│   ├── store/store.go              # thread-safe image → platforms store
-│   ├── inspector/inspector.go      # OCI manifest inspection (go-containerregistry)
-│   ├── watcher/watcher.go          # pod informer + inspection work queue
-│   └── collector/
-│       ├── collector.go            # image metrics
-│       └── selfmetrics.go          # the exporter's own metrics
-├── charts/kubearch/                # Helm chart
-├── PERFORMANCE.md                  # measured hot paths, with before/after
-└── Dockerfile                      # multi-stage build (local dev only;
-                                    # the published image is built by ko)
-```
-
-## Release
-
-Releases are cut automatically from [Conventional Commits](https://www.conventionalcommits.org/):
-
-1. Push (or merge) commits to `main`: `feat:` bumps the minor, `fix:` the patch,
-   a breaking change the minor while the project is still `0.x`. Every other type
-   (`chore:`, `docs:`, `ci:`, `perf:`, `refactor:`, `test:`) releases nothing, so
-   mark a change with `fix:` if it needs to ship on its own
-2. The `Release` workflow computes the next `vX.Y.Z` and creates the tag
-3. In the same run, GoReleaser publishes the binaries and the multi-arch image to `ghcr.io/PixiBixi/kubearch`, then the Helm chart is pushed to `oci://ghcr.io/pixibixi/kubearch/charts`
-
-Pushing a `v*` tag by hand still triggers the same release path.
-
-Dependency updates are handled by Renovate: minor/patch/digest PRs automerge once CI is green, and Go module bumps land as `feat(deps)`/`fix(deps)` so they ship in a release of their own.
+Architecture and design decisions are in [AGENTS.md](AGENTS.md), measurements in [PERFORMANCE.md](PERFORMANCE.md). Releases are automatic from [Conventional Commits](https://www.conventionalcommits.org/) on `main`: `feat:` cuts a minor, `fix:` a patch.
 
 ## License
 
