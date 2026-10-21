@@ -80,7 +80,8 @@ func (s *Store) SetPodImages(podRef string, imageRefs []string) (toInspect, orph
 	return toInspect, orphaned
 }
 
-// SetImage stores the inspection result.
+// SetImage stores the inspection result, replacing any previous one in place so
+// a re-inspection never leaves a gap in the metrics.
 // Skips storage if no pod references the image anymore (deleted during inspection).
 func (s *Store) SetImage(imageRef, digest string, platforms []types.Platform) {
 	s.mu.Lock()
@@ -99,14 +100,15 @@ func (s *Store) SetImage(imageRef, digest string, platforms []types.Platform) {
 }
 
 // ClaimPending marks imageRef as in flight and reports whether the caller
-// should inspect it: a pod still references it and it has no result yet. On a
-// refusal pending is cleared, since the queue is the only owner of that slot.
-func (s *Store) ClaimPending(imageRef string) bool {
+// should inspect it: a pod still references it and it has no result yet, or
+// allowKnown is set (re-inspection, which keeps the current result visible).
+// On a refusal pending is cleared, since the queue is the only owner of that slot.
+func (s *Store) ClaimPending(imageRef string, allowKnown bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	_, known := s.images[imageRef]
-	if known || len(s.imagePods[imageRef]) == 0 {
+	if (known && !allowKnown) || len(s.imagePods[imageRef]) == 0 {
 		delete(s.pending, imageRef)
 		return false
 	}

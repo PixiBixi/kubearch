@@ -39,8 +39,14 @@ func main() {
 		kubeContext = flag.String("context", "", "Kubernetes context to use (empty = current context)")
 		showVersion = flag.Bool("version", false, "Print version information and exit")
 		digestLabel = flag.Bool("digest-label", true, "Include the digest label on image metrics (disable to avoid a new time series on every image rebuild of the same tag)")
+		reinspect   = flag.Duration("reinspect-interval", 0, "Re-inspect known images this often to follow mutable tags (0 = inspect each image once)")
 	)
 	flag.Parse()
+
+	if *reinspect < 0 {
+		fmt.Fprintf(os.Stderr, "-reinspect-interval must not be negative, got %s\n", *reinspect)
+		os.Exit(2)
+	}
 
 	if *showVersion {
 		fmt.Printf("kubearch %s (commit: %s, built: %s)\n", version, commit, date)
@@ -53,6 +59,7 @@ func main() {
 		"commit", commit,
 		"addr", *addr,
 		"namespace", nsLabel(*namespace),
+		"reinspectInterval", *reinspect,
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -80,7 +87,7 @@ func main() {
 		return w.QueueDepth()
 	}
 	selfMetrics := collector.NewSelfMetrics(version, commit, s, queueDepth)
-	w = watcher.New(k8sClient, *namespace, s, insp, logger, selfMetrics)
+	w = watcher.New(k8sClient, *namespace, s, insp, logger, selfMetrics, watcher.WithReinspectInterval(*reinspect))
 
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collector.New(s, collector.WithDigestLabel(*digestLabel)))

@@ -82,6 +82,10 @@ type Watcher struct {
 	workers   int
 	metrics   Metrics
 
+	// reinspectInterval re-queues known images so a mutable tag that moved is
+	// picked up. Zero disables it.
+	reinspectInterval time.Duration
+
 	// queue dedupes images, rate-limits retries and bounds the backlog.
 	queue workqueue.TypedRateLimitingInterface[string]
 
@@ -93,14 +97,26 @@ type Watcher struct {
 	authByImage map[string][]inspector.PodAuth
 }
 
+// Option configures a Watcher constructed via New.
+type Option func(*Watcher)
+
+// WithReinspectInterval re-inspects every known, still referenced image this
+// often, for mutable tags (latest, a moving minor) whose manifest can change
+// under the same ref. Zero, the default, inspects each image once.
+func WithReinspectInterval(d time.Duration) Option {
+	return func(w *Watcher) {
+		w.reinspectInterval = d
+	}
+}
+
 // New builds a Watcher. metrics may be nil, in which case inspection
 // outcomes are silently dropped instead of forcing every caller (tests
 // included) to supply a Metrics implementation.
-func New(client kubernetes.Interface, namespace string, s *store.Store, insp Inspector, logger *slog.Logger, metrics Metrics) *Watcher {
+func New(client kubernetes.Interface, namespace string, s *store.Store, insp Inspector, logger *slog.Logger, metrics Metrics, opts ...Option) *Watcher {
 	if metrics == nil {
 		metrics = noopMetrics{}
 	}
-	return &Watcher{
+	w := &Watcher{
 		client:    client,
 		namespace: namespace,
 		store:     s,
@@ -114,6 +130,10 @@ func New(client kubernetes.Interface, namespace string, s *store.Store, insp Ins
 		),
 		authByImage: make(map[string][]inspector.PodAuth),
 	}
+	for _, opt := range opts {
+		opt(w)
+	}
+	return w
 }
 
 // QueueDepth reports the number of images currently waiting in the work
@@ -213,7 +233,7 @@ func (w *Watcher) processNext(ctx context.Context) bool {
 
 	// Slow retries are queued with pending clear, and any entry may have gone
 	// stale (resolved, or its pods deleted) while it waited.
-	if !w.store.ClaimPending(imageRef) {
+	if !w.store.ClaimPending(imageRef, w.reinspectInterval > 0) {
 		w.queue.Forget(imageRef)
 		return true
 	}
@@ -250,8 +270,19 @@ func (w *Watcher) giveUp(imageRef string, attempts int, err error) {
 		"image", imageRef, "attempts", attempts, "err", err)
 	w.queue.Forget(imageRef)
 	w.store.FailImage(imageRef)
-	if referenced, known := w.store.State(imageRef); referenced && !known {
+	w.scheduleNext(imageRef)
+}
+
+// scheduleNext queues the next visit of an image its pods still run: a slow
+// retry while it has no result, a re-inspection once it has one (if enabled).
+func (w *Watcher) scheduleNext(imageRef string) {
+	referenced, known := w.store.State(imageRef)
+	switch {
+	case !referenced:
+	case !known:
 		w.queue.AddAfter(imageRef, failedRetryInterval)
+	case w.reinspectInterval > 0:
+		w.queue.AddAfter(imageRef, w.reinspectInterval)
 	}
 }
 
@@ -277,6 +308,7 @@ func (w *Watcher) inspect(ctx context.Context, imageRef string) error {
 	w.metrics.ObserveInspection("success", time.Since(start))
 
 	w.store.SetImage(imageRef, digest, platforms)
+	w.scheduleNext(imageRef)
 	w.logger.Info("inspection done",
 		"image", imageRef,
 		"digest", shortDigest(digest),

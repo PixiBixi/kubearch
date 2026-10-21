@@ -335,13 +335,13 @@ func TestClaimPending_ReclaimsReferencedImage(t *testing.T) {
 	track(s, "ns/pod1", "nginx:latest")
 	s.FailImage("nginx:latest")
 
-	if !s.ClaimPending("nginx:latest") {
+	if !s.ClaimPending("nginx:latest", false) {
 		t.Fatal("a referenced, unknown image must be claimable")
 	}
 	if track(s, "ns/pod2", "nginx:latest") {
 		t.Error("a claimed image must not be queued a second time by a pod event")
 	}
-	if !s.ClaimPending("nginx:latest") {
+	if !s.ClaimPending("nginx:latest", false) {
 		t.Error("claiming an image the caller already owns must succeed")
 	}
 }
@@ -351,7 +351,7 @@ func TestClaimPending_RefusesKnownImage(t *testing.T) {
 	track(s, "ns/pod1", "nginx:latest")
 	s.SetImage("nginx:latest", "sha256:abc", linuxAmd64)
 
-	if s.ClaimPending("nginx:latest") {
+	if s.ClaimPending("nginx:latest", false) {
 		t.Error("an already inspected image must not be claimed")
 	}
 }
@@ -361,10 +361,35 @@ func TestClaimPending_ReleasesOrphan(t *testing.T) {
 	track(s, "ns/pod1", "nginx:latest")
 	s.RemovePod("ns/pod1") // pending survives the unlink, owned by the queue
 
-	if s.ClaimPending("nginx:latest") {
+	if s.ClaimPending("nginx:latest", false) {
 		t.Error("an image no pod references must not be claimed")
 	}
 	if _, pending, _ := s.Stats(); pending != 0 {
 		t.Errorf("pending = %d after a refused claim, want 0", pending)
+	}
+}
+
+// Re-inspecting a mutable tag claims an image that already has a result.
+func TestClaimPending_AllowsKnownForReinspection(t *testing.T) {
+	s := New()
+	track(s, "ns/pod1", "nginx:latest")
+	s.SetImage("nginx:latest", "sha256:old", linuxAmd64)
+
+	if !s.ClaimPending("nginx:latest", true) {
+		t.Fatal("a known image must be claimable for re-inspection")
+	}
+	if len(s.Snapshot()) != 1 {
+		t.Error("a re-inspection in flight must not hide the current result")
+	}
+	if track(s, "ns/pod2", "nginx:latest") {
+		t.Error("a known image must not be queued by a pod event")
+	}
+
+	s.SetImage("nginx:latest", "sha256:new", linuxAmd64)
+	if snap := s.Snapshot(); len(snap) != 1 || snap[0].Digest != "sha256:new" {
+		t.Errorf("snapshot after re-inspection = %+v, want the new digest in place", snap)
+	}
+	if _, pending, _ := s.Stats(); pending != 0 {
+		t.Errorf("pending = %d after re-inspection, want 0", pending)
 	}
 }
