@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"slices"
 	"sync"
 	"testing"
 
@@ -247,5 +248,50 @@ func TestCollect_PlatformCountValue(t *testing.T) {
 	}
 	if countValue != 3.0 {
 		t.Errorf("kubearch_image_platform_count = %v, want 3.0", countValue)
+	}
+}
+
+// arm/v6 and arm/v7 binaries are not interchangeable, so the variant must
+// tell them apart, and read as an empty string where the manifest has none.
+func TestCollect_VariantLabel(t *testing.T) {
+	for _, digest := range []bool{true, false} {
+		s := store.New()
+		s.SetPodImages("ns/pod1", []string{"img:1"})
+		s.SetImage("img:1", "sha256:fff", []types.Platform{
+			{OS: "linux", Arch: "amd64"},
+			{OS: "linux", Arch: "arm", Variant: "v6"},
+			{OS: "linux", Arch: "arm", Variant: "v7"},
+		})
+
+		reg := prometheus.NewRegistry()
+		if err := reg.Register(New(s, WithDigestLabel(digest))); err != nil {
+			t.Fatalf("Register failed: %v", err)
+		}
+		mfs, err := reg.Gather()
+		if err != nil {
+			t.Fatalf("Gather failed: %v", err)
+		}
+
+		var got []string
+		for _, mf := range mfs {
+			if mf.GetName() != "kubearch_image_platform_supported" {
+				continue
+			}
+			for _, m := range mf.GetMetric() {
+				labels := make(map[string]string)
+				for _, l := range m.GetLabel() {
+					labels[l.GetName()] = l.GetValue()
+				}
+				v, ok := labels["variant"]
+				if !ok {
+					t.Fatalf("digest=%v: variant label missing on %v", digest, labels)
+				}
+				got = append(got, labels["arch"]+"/"+v)
+			}
+		}
+		slices.Sort(got)
+		if want := []string{"amd64/", "arm/v6", "arm/v7"}; !slices.Equal(got, want) {
+			t.Errorf("digest=%v: arch/variant series = %v, want %v", digest, got, want)
+		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -21,7 +22,11 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/random"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
+
+	"github.com/PixiBixi/kubearch/internal/types"
 )
 
 func TestNew(t *testing.T) {
@@ -157,6 +162,102 @@ func TestInspect_SingleArch(t *testing.T) {
 	}
 	if platforms[0].OS != "linux" || platforms[0].Arch != "amd64" {
 		t.Errorf("unexpected platform: %+v", platforms[0])
+	}
+}
+
+func TestInspect_KeepsVariants(t *testing.T) {
+	host := startTestRegistry(t)
+
+	var adds []mutate.IndexAddendum
+	for _, p := range []v1.Platform{
+		{OS: "linux", Architecture: "arm", Variant: "v6"},
+		{OS: "linux", Architecture: "arm", Variant: "v7"},
+		{OS: "linux", Architecture: "arm", Variant: "v7"}, // duplicate entry
+		{OS: "linux", Architecture: "amd64"},
+	} {
+		img, err := random.Image(256, 1)
+		if err != nil {
+			t.Fatalf("random.Image: %v", err)
+		}
+		adds = append(adds, mutate.IndexAddendum{Add: img, Platform: &p})
+	}
+	imageRef := host + "/test/variants:latest"
+	ref, err := name.ParseReference(imageRef, name.Insecure)
+	if err != nil {
+		t.Fatalf("ParseReference: %v", err)
+	}
+	if err := remote.WriteIndex(ref, mutate.AppendManifests(empty.Index, adds...)); err != nil {
+		t.Fatalf("WriteIndex: %v", err)
+	}
+
+	_, platforms, err := newTestInspector(t, fake.NewClientset()).Inspect(context.Background(), imageRef, PodAuth{})
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	want := []types.Platform{
+		{OS: "linux", Arch: "arm", Variant: "v6"},
+		{OS: "linux", Arch: "arm", Variant: "v7"},
+		{OS: "linux", Arch: "amd64"},
+	}
+	if !slices.Equal(platforms, want) {
+		t.Errorf("platforms = %+v, want %+v", platforms, want)
+	}
+}
+
+func TestInspect_SingleArchVariant(t *testing.T) {
+	host := startTestRegistry(t)
+
+	img, err := random.Image(256, 1)
+	if err != nil {
+		t.Fatalf("random.Image: %v", err)
+	}
+	img, err = mutate.ConfigFile(img, &v1.ConfigFile{OS: "linux", Architecture: "arm64", Variant: "v8"})
+	if err != nil {
+		t.Fatalf("mutate.ConfigFile: %v", err)
+	}
+	imageRef := host + "/test/single-variant:latest"
+	ref, err := name.ParseReference(imageRef, name.Insecure)
+	if err != nil {
+		t.Fatalf("ParseReference: %v", err)
+	}
+	if err := remote.Write(ref, img); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	_, platforms, err := newTestInspector(t, fake.NewClientset()).Inspect(context.Background(), imageRef, PodAuth{})
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if want := []types.Platform{{OS: "linux", Arch: "arm64", Variant: "v8"}}; !slices.Equal(platforms, want) {
+		t.Errorf("platforms = %+v, want %+v", platforms, want)
+	}
+}
+
+// An index holding only attestations would otherwise be stored with zero
+// platforms, which the metrics would report as a single-arch image.
+func TestInspect_IndexWithoutPlatformsFails(t *testing.T) {
+	host := startTestRegistry(t)
+
+	img, err := random.Image(256, 1)
+	if err != nil {
+		t.Fatalf("random.Image: %v", err)
+	}
+	idx := mutate.AppendManifests(empty.Index, mutate.IndexAddendum{
+		Add:      img,
+		Platform: &v1.Platform{OS: "unknown", Architecture: "unknown"},
+	})
+	imageRef := host + "/test/attestations-only:latest"
+	ref, err := name.ParseReference(imageRef, name.Insecure)
+	if err != nil {
+		t.Fatalf("ParseReference: %v", err)
+	}
+	if err := remote.WriteIndex(ref, idx); err != nil {
+		t.Fatalf("WriteIndex: %v", err)
+	}
+
+	_, platforms, err := newTestInspector(t, fake.NewClientset()).Inspect(context.Background(), imageRef, PodAuth{})
+	if err == nil {
+		t.Errorf("Inspect = %v, nil error; want an error for an index with no platform", platforms)
 	}
 }
 
@@ -327,9 +428,66 @@ func TestIsAuthError(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isAuthError(tc.err); got != tc.want {
-				t.Errorf("isAuthError(%v) = %v, want %v", tc.err, got, tc.want)
+			if got := IsAuthError(tc.err); got != tc.want {
+				t.Errorf("IsAuthError(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestIsPermanent(t *testing.T) {
+	_, _, parseErr := New(fake.NewClientset(), slog.New(slog.NewTextHandler(io.Discard, nil))).
+		Inspect(context.Background(), ":::invalid:::", PodAuth{})
+
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"not found", &transport.Error{StatusCode: http.StatusNotFound}, true},
+		{"manifest unknown", &transport.Error{
+			StatusCode: http.StatusBadRequest,
+			Errors:     []transport.Diagnostic{{Code: transport.ManifestUnknownErrorCode}},
+		}, true},
+		{"name unknown", fmt.Errorf("fetch: %w", &transport.Error{
+			StatusCode: http.StatusBadRequest,
+			Errors:     []transport.Diagnostic{{Code: transport.NameUnknownErrorCode}},
+		}), true},
+		{"bad reference", parseErr, true},
+		{"unauthorized", &transport.Error{StatusCode: http.StatusUnauthorized}, false},
+		{"unavailable", &transport.Error{StatusCode: http.StatusServiceUnavailable}, false},
+		{"plain error", errors.New("connection refused"), false},
+		{"nil", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsPermanent(tc.err); got != tc.want {
+				t.Errorf("IsPermanent(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// The keychain build is shared by every caller waiting on the same
+// credentials, so the caller that happened to start it must not be able to
+// cancel it for all of them. A real clientset is needed: the fake ignores ctx.
+func TestPullerFor_SharedBuildOutlivesLeaderCancellation(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}`)
+	}))
+	t.Cleanup(apiServer.Close)
+
+	client, err := kubernetes.NewForConfig(&rest.Config{Host: apiServer.URL})
+	if err != nil {
+		t.Fatalf("NewForConfig: %v", err)
+	}
+	insp := New(client, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := insp.pullerFor(ctx, PodAuth{Namespace: "prod", ServiceAccountName: "app"}); err != nil {
+		t.Errorf("pullerFor with a cancelled leader ctx: %v, want the shared build to complete", err)
 	}
 }

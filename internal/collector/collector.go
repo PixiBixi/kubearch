@@ -22,7 +22,7 @@ var (
 		platformSupported: prometheus.NewDesc(
 			"kubearch_image_platform_supported",
 			"Whether the image supports the given platform (value is always 1 when the entry exists).",
-			[]string{"image", "digest", "os", "arch"},
+			[]string{"image", "digest", "os", "arch", "variant"},
 			nil,
 		),
 		platformCount: prometheus.NewDesc(
@@ -42,7 +42,7 @@ var (
 		platformSupported: prometheus.NewDesc(
 			"kubearch_image_platform_supported",
 			"Whether the image supports the given platform (value is always 1 when the entry exists).",
-			[]string{"image", "os", "arch"},
+			[]string{"image", "os", "arch", "variant"},
 			nil,
 		),
 		platformCount: prometheus.NewDesc(
@@ -107,7 +107,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	for _, info := range c.store.Snapshot() {
 		if c.digestLabel {
 			for _, p := range info.Platforms {
-				ch <- prometheus.MustNewConstMetric(d.platformSupported, prometheus.GaugeValue, 1, info.Ref, info.Digest, p.OS, p.Arch)
+				ch <- prometheus.MustNewConstMetric(d.platformSupported, prometheus.GaugeValue, 1, info.Ref, info.Digest, p.OS, p.Arch, p.Variant)
 			}
 
 			count := float64(len(info.Platforms))
@@ -122,7 +122,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		}
 
 		for _, p := range info.Platforms {
-			ch <- prometheus.MustNewConstMetric(d.platformSupported, prometheus.GaugeValue, 1, info.Ref, p.OS, p.Arch)
+			ch <- prometheus.MustNewConstMetric(d.platformSupported, prometheus.GaugeValue, 1, info.Ref, p.OS, p.Arch, p.Variant)
 		}
 
 		count := float64(len(info.Platforms))

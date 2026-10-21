@@ -27,6 +27,10 @@ import (
 // secrets do rotate, hence the expiry (and the eviction on auth failure).
 const credTTL = 5 * time.Minute
 
+// keychainTimeout bounds a shared keychain build, which runs detached from the
+// caller that started it so its cancellation cannot fail every waiter.
+const keychainTimeout = 15 * time.Second
+
 // PodAuth carries the authentication context derived from a pod spec.
 type PodAuth struct {
 	Namespace          string
@@ -89,7 +93,7 @@ func (i *Inspector) Inspect(ctx context.Context, imageRef string, auth PodAuth) 
 
 	desc, err := puller.Get(ctx, ref)
 	if err != nil {
-		if isAuthError(err) {
+		if IsAuthError(err) {
 			// Credentials may have rotated under us; the next attempt rebuilds them.
 			i.evict(auth)
 		}
@@ -114,11 +118,15 @@ func (i *Inspector) Inspect(ctx context.Context, imageRef string, auth PodAuth) 
 			if m.Platform == nil || m.Platform.OS == "" || m.Platform.OS == "unknown" {
 				continue // skip attestation blobs and malformed entries
 			}
-			p := types.Platform{OS: m.Platform.OS, Arch: m.Platform.Architecture}
+			p := types.Platform{OS: m.Platform.OS, Arch: m.Platform.Architecture, Variant: m.Platform.Variant}
 			if _, ok := seen[p]; !ok {
 				seen[p] = struct{}{}
 				platforms = append(platforms, p)
 			}
+		}
+		if len(platforms) == 0 {
+			// Stored as is, it would read as a single-arch image in the metrics.
+			return "", nil, errors.New("image index lists no platform")
 		}
 		return digest, platforms, nil
 	}
@@ -133,7 +141,7 @@ func (i *Inspector) Inspect(ctx context.Context, imageRef string, auth PodAuth) 
 	if err != nil {
 		return "", nil, fmt.Errorf("get config file: %w", err)
 	}
-	return digest, []types.Platform{{OS: cf.OS, Arch: cf.Architecture}}, nil
+	return digest, []types.Platform{{OS: cf.OS, Arch: cf.Architecture, Variant: cf.Variant}}, nil
 }
 
 // pullerFor returns a registry client for auth, building (and caching) one on
@@ -150,6 +158,8 @@ func (i *Inspector) pullerFor(ctx context.Context, auth PodAuth) (*remote.Puller
 			return p, nil
 		}
 
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), keychainTimeout)
+		defer cancel()
 		kc, err := authnk8s.New(ctx, i.k8sClient, authnk8s.Options{
 			Namespace:          auth.Namespace,
 			ServiceAccountName: auth.ServiceAccountName,
@@ -204,12 +214,30 @@ func (i *Inspector) evict(auth PodAuth) {
 	delete(i.pullers, auth.cacheKey())
 }
 
-// isAuthError reports whether the registry rejected our credentials, as opposed
+// IsAuthError reports whether the registry rejected our credentials, as opposed
 // to the image being missing or the registry being unreachable.
-func isAuthError(err error) bool {
+func IsAuthError(err error) bool {
 	var terr *transport.Error
 	if !errors.As(err, &terr) {
 		return false
 	}
 	return terr.StatusCode == http.StatusUnauthorized || terr.StatusCode == http.StatusForbidden
+}
+
+// IsPermanent reports whether retrying err within minutes is pointless: the
+// manifest or repository does not exist, or the reference does not parse.
+func IsPermanent(err error) bool {
+	if _, ok := errors.AsType[*name.ErrBadName](err); ok {
+		return true
+	}
+	terr, ok := errors.AsType[*transport.Error](err)
+	if !ok {
+		return false
+	}
+	if terr.StatusCode == http.StatusNotFound {
+		return true
+	}
+	return slices.ContainsFunc(terr.Errors, func(d transport.Diagnostic) bool {
+		return d.Code == transport.ManifestUnknownErrorCode || d.Code == transport.NameUnknownErrorCode
+	})
 }

@@ -5,13 +5,16 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"runtime/pprof"
 	"slices"
+	"strconv"
 	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	corev1 "k8s.io/api/core/v1"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
@@ -64,11 +67,11 @@ func newTestWatcher(s *store.Store, insp Inspector) *Watcher {
 	return newTestWatcherWithMetrics(s, insp, nil)
 }
 
-func newTestWatcherWithMetrics(s *store.Store, insp Inspector, metrics Metrics) *Watcher {
+func newTestWatcherWithMetrics(s *store.Store, insp Inspector, metrics Metrics, opts ...Option) *Watcher {
 	// The production rate limiter is used as-is: inside a synctest bubble the
 	// retry delays run on the fake clock, so the real backoff curve is what
 	// gets exercised and it costs no wall-clock time to wait out.
-	return New(k8sfake.NewClientset(), "default", s, insp, slog.New(slog.NewTextHandler(io.Discard, nil)), metrics)
+	return New(k8sfake.NewClientset(), "default", s, insp, slog.New(slog.NewTextHandler(io.Discard, nil)), metrics, opts...)
 }
 
 // startWorkers runs the inspection workers for the duration of the test.
@@ -319,6 +322,371 @@ func TestInspect_GivesUpAfterMaxAttempts(t *testing.T) {
 		if _, pending, _ := s.Stats(); pending != 0 {
 			t.Errorf("expected 0 pending images after giving up, got %d", pending)
 		}
+	})
+}
+
+// Informer resync is off and status updates are short-circuited, so a pod that
+// outlives a registry outage would never get its image inspected without a
+// slow retry. The retry must still find the pod's credentials.
+func TestInspect_SlowRetryAfterGivingUp(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		var mu sync.Mutex
+		calls := 0
+
+		w := newTestWatcher(s, &fakeInspector{
+			fn: func(_ context.Context, _ string, auth inspector.PodAuth) (string, []types.Platform, error) {
+				mu.Lock()
+				calls++
+				n := calls
+				mu.Unlock()
+				if auth.Namespace != "default" {
+					return "", nil, errors.New("inspected without the pod's credentials")
+				}
+				if n <= maxAttempts {
+					return "", nil, errors.New("registry down")
+				}
+				return "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+			},
+		})
+		startWorkers(t, w)
+
+		w.onPod(makePod("default", "pod1", "flaky:image"))
+		settle(t, "the retries to be exhausted", func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return calls == maxAttempts
+		})
+
+		synctest.Sleep(failedRetryInterval)
+		settle(t, "the slow retry to succeed", func() bool { return len(s.Snapshot()) == 1 })
+	})
+}
+
+// A missing manifest or a malformed reference will not fix itself within the
+// backoff window: retrying it only burns registry quota.
+func TestInspect_GivesUpAtOnceOnPermanentError(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		var mu sync.Mutex
+		calls := 0
+
+		w := newTestWatcher(s, &fakeInspector{
+			fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+				mu.Lock()
+				calls++
+				mu.Unlock()
+				return "", nil, &transport.Error{StatusCode: http.StatusNotFound}
+			},
+		})
+		startWorkers(t, w)
+
+		w.onPod(makePod("default", "pod1", "missing:image"))
+		synctest.Sleep(5 * time.Minute) // well past the whole fast retry window
+
+		mu.Lock()
+		defer mu.Unlock()
+		if calls != 1 {
+			t.Errorf("expected 1 attempt for a permanent error, got %d", calls)
+		}
+		if _, pending, _ := s.Stats(); pending != 0 {
+			t.Errorf("expected 0 pending images after giving up, got %d", pending)
+		}
+	})
+}
+
+// The slow retry is only for images a live pod still runs.
+func TestInspect_NoSlowRetryOncePodIsGone(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		var mu sync.Mutex
+		calls := 0
+
+		w := newTestWatcher(s, &fakeInspector{
+			fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+				mu.Lock()
+				calls++
+				mu.Unlock()
+				return "", nil, errors.New("registry down")
+			},
+		})
+		startWorkers(t, w)
+
+		pod := makePod("default", "pod1", "broken:image")
+		w.onPod(pod)
+		settle(t, "the retries to be exhausted", func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return calls == maxAttempts
+		})
+		w.onDelete(pod)
+
+		synctest.Sleep(3 * failedRetryInterval)
+
+		mu.Lock()
+		defer mu.Unlock()
+		if calls != maxAttempts {
+			t.Errorf("expected %d attempts after the pod was deleted, got %d", maxAttempts, calls)
+		}
+		if _, pending, _ := s.Stats(); pending != 0 {
+			t.Errorf("expected 0 pending images, got %d", pending)
+		}
+	})
+}
+
+// Credentials are kept while an image is referenced and dropped with its
+// last pod, so the map is bounded by the live image set.
+func TestAuth_DroppedWithLastPod(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		w := newTestWatcher(s, &fakeInspector{
+			fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+				return "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+			},
+		})
+		startWorkers(t, w)
+
+		pod1 := makePod("default", "pod1", "nginx:latest", "redis:7")
+		w.onPod(pod1)
+		w.onPod(makePod("default", "pod2", "nginx:latest"))
+		settle(t, "both images", func() bool { return len(s.Snapshot()) == 2 })
+
+		if len(w.authFor("nginx:latest")) == 0 {
+			t.Error("auth of a referenced, inspected image must be kept")
+		}
+
+		w.onPod(makePod("default", "pod1", "nginx:latest")) // update drops redis:7
+		if len(w.authFor("redis:7")) != 0 {
+			t.Error("auth of an image orphaned by an update must be dropped")
+		}
+
+		w.onDelete(pod1)
+		w.onDelete(makePod("default", "pod2", "nginx:latest"))
+		if len(w.authFor("nginx:latest")) != 0 {
+			t.Error("auth of an image orphaned by a delete must be dropped")
+		}
+	})
+}
+
+func makePodWithSA(ns, name, sa string, images ...string) *corev1.Pod {
+	pod := makePod(ns, name, images...)
+	pod.Spec.ServiceAccountName = sa
+	return pod
+}
+
+// Every pod referencing an image may bring credentials the first one lacks,
+// so each distinct set is kept, up to a bound.
+func TestAuth_KeepsDistinctCredentialsPerImage(t *testing.T) {
+	s := store.New()
+	w := newTestWatcher(s, &fakeInspector{})
+
+	w.onPod(makePodWithSA("default", "pod1", "sa-a", "private:image"))
+	w.onPod(makePodWithSA("default", "pod2", "sa-a", "private:image")) // same credentials
+	w.onPod(makePodWithSA("default", "pod3", "sa-b", "private:image"))
+
+	got := w.authFor("private:image")
+	if len(got) != 2 || got[0].ServiceAccountName != "sa-a" || got[1].ServiceAccountName != "sa-b" {
+		t.Fatalf("authFor = %+v, want sa-a then sa-b", got)
+	}
+
+	for i := range 2 * maxAuthsPerImage {
+		n := strconv.Itoa(i)
+		w.onPod(makePodWithSA("default", "extra-"+n, "sa-"+n, "private:image"))
+	}
+	if got := len(w.authFor("private:image")); got != maxAuthsPerImage {
+		t.Errorf("credentials kept = %d, want the bound %d", got, maxAuthsPerImage)
+	}
+}
+
+// A 401 under one pod's credentials says nothing about another pod's: the
+// next set is tried before the attempt counts as a failure.
+func TestInspect_TriesNextCredentialsOnAuthError(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		metrics := &fakeMetrics{}
+		w := newTestWatcherWithMetrics(s, &fakeInspector{
+			fn: func(_ context.Context, _ string, auth inspector.PodAuth) (string, []types.Platform, error) {
+				if auth.ServiceAccountName != "puller" {
+					return "", nil, &transport.Error{StatusCode: http.StatusUnauthorized}
+				}
+				return "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+			},
+		}, metrics)
+
+		// Both pods land before any worker runs, as on an initial sync.
+		w.onPod(makePodWithSA("default", "pod1", "default", "private:image"))
+		w.onPod(makePodWithSA("default", "pod2", "puller", "private:image"))
+		startWorkers(t, w)
+
+		settle(t, "the image to be inspected", func() bool { return len(s.Snapshot()) == 1 })
+		if _, retries := metrics.snapshot(); retries != 0 {
+			t.Errorf("retries = %d, want 0: the second credentials should be tried in the same attempt", retries)
+		}
+	})
+}
+
+// countingInspector returns a new digest on every call, as a mutable tag that
+// keeps being pushed would.
+type countingInspector struct {
+	mu    sync.Mutex
+	calls int
+	auths []inspector.PodAuth
+}
+
+func (c *countingInspector) Inspect(_ context.Context, _ string, auth inspector.PodAuth) (string, []types.Platform, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	c.auths = append(c.auths, auth)
+	return "sha256:v" + strconv.Itoa(c.calls), []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+}
+
+func (c *countingInspector) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+const testReinspectInterval = time.Hour
+
+func TestReinspect_UpdatesKnownImageInPlace(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		insp := &countingInspector{}
+		w := newTestWatcherWithMetrics(s, insp, nil, WithReinspectInterval(testReinspectInterval))
+		startWorkers(t, w)
+
+		w.onPod(makePodWithSA("default", "pod1", "app", "app:latest"))
+		settle(t, "the first inspection", func() bool { return len(s.Snapshot()) == 1 })
+
+		synctest.Sleep(testReinspectInterval - time.Minute)
+		if snap := s.Snapshot(); insp.count() != 1 || snap[0].Digest != "sha256:v1" {
+			t.Fatalf("re-inspected before the interval: calls = %d, snapshot = %+v", insp.count(), snap)
+		}
+
+		settle(t, "the re-inspection", func() bool {
+			snap := s.Snapshot()
+			if len(snap) != 1 {
+				t.Fatalf("snapshot = %+v during re-inspection, want the image kept", snap)
+			}
+			return snap[0].Digest == "sha256:v2"
+		})
+		insp.mu.Lock()
+		got := insp.auths[1]
+		insp.mu.Unlock()
+		if got.ServiceAccountName != "app" {
+			t.Errorf("re-inspection ran with %+v, want the pod's credentials", got)
+		}
+
+		synctest.Sleep(testReinspectInterval)
+		settle(t, "the next re-inspection", func() bool { return s.Snapshot()[0].Digest == "sha256:v3" })
+	})
+}
+
+func TestReinspect_DisabledByDefault(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		insp := &countingInspector{}
+		w := newTestWatcher(s, insp)
+		startWorkers(t, w)
+
+		w.onPod(makePod("default", "pod1", "app:latest"))
+		settle(t, "the first inspection", func() bool { return len(s.Snapshot()) == 1 })
+		synctest.Sleep(24 * time.Hour)
+
+		if got := insp.count(); got != 1 {
+			t.Errorf("inspections = %d with re-inspection disabled, want 1", got)
+		}
+	})
+}
+
+func TestReinspect_StopsWithLastPod(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		insp := &countingInspector{}
+		w := newTestWatcherWithMetrics(s, insp, nil, WithReinspectInterval(testReinspectInterval))
+		startWorkers(t, w)
+
+		pod := makePod("default", "pod1", "app:latest")
+		w.onPod(pod)
+		settle(t, "the first inspection", func() bool { return len(s.Snapshot()) == 1 })
+		w.onDelete(pod)
+		synctest.Sleep(3 * testReinspectInterval)
+
+		if got := insp.count(); got != 1 {
+			t.Errorf("inspections = %d after the last pod went away, want 1", got)
+		}
+		if _, pending, _ := s.Stats(); pending != 0 {
+			t.Errorf("pending = %d, want 0", pending)
+		}
+	})
+}
+
+// A known image whose re-inspection keeps failing is still re-inspected on
+// the next interval, and keeps its last result meanwhile.
+func TestReinspect_SurvivesFailedRound(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		var mu sync.Mutex
+		calls := 0
+		w := newTestWatcherWithMetrics(s, &fakeInspector{
+			fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				calls++
+				switch {
+				case calls == 1:
+					return "sha256:v1", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+				case calls <= 1+maxAttempts:
+					return "", nil, errors.New("registry down")
+				default:
+					return "sha256:v2", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+				}
+			},
+		}, nil, WithReinspectInterval(testReinspectInterval))
+		startWorkers(t, w)
+
+		w.onPod(makePod("default", "pod1", "app:latest"))
+		settle(t, "the first inspection", func() bool { return len(s.Snapshot()) == 1 })
+
+		synctest.Sleep(testReinspectInterval)
+		settle(t, "the failed round to give up", func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return calls == 1+maxAttempts
+		})
+		if snap := s.Snapshot(); len(snap) != 1 || snap[0].Digest != "sha256:v1" {
+			t.Fatalf("snapshot after a failed round = %+v, want the previous result kept", snap)
+		}
+
+		synctest.Sleep(testReinspectInterval)
+		settle(t, "the next round", func() bool { return s.Snapshot()[0].Digest == "sha256:v2" })
+	})
+}
+
+// A queued image whose auth entry is gone (a pod event racing the worker's
+// cleanup) must not stay pending forever, or no later pod could re-trigger it.
+func TestInspect_MissingAuthClearsPending(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		w := newTestWatcher(s, &fakeInspector{
+			fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+				return "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+			},
+		})
+		startWorkers(t, w)
+
+		// The state the race leaves behind: pending in the store, no auth.
+		s.SetPodImages("default/pod1", []string{"orphan:image"})
+		w.queue.Add("orphan:image")
+
+		settle(t, "pending to be cleared", func() bool {
+			_, pending, _ := s.Stats()
+			return pending == 0
+		})
+
+		w.onPod(makePod("default", "pod2", "orphan:image"))
+		settle(t, "the image to be inspected", func() bool { return len(s.Snapshot()) == 1 })
 	})
 }
 
@@ -667,5 +1035,29 @@ func TestShortDigest_Exactly19(t *testing.T) {
 	got := shortDigest(digest)
 	if got != digest {
 		t.Errorf("shortDigest of 19-char digest = %q, want %q", got, digest)
+	}
+}
+
+func TestHasSynced_AfterRun(t *testing.T) {
+	w := newTestWatcher(store.New(), &fakeInspector{})
+	if w.HasSynced() {
+		t.Fatal("HasSynced() = true before Run")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !w.HasSynced() {
+		if time.Now().After(deadline) {
+			t.Fatal("HasSynced() still false 5s after Run started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("Run returned %v on clean cancel, want nil", err)
 	}
 }

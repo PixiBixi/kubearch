@@ -30,6 +30,8 @@ serviceAccount:
 rbac:
   # Create the required Role/ClusterRole and binding.
   create: true
+  # Grant get on secrets and serviceaccounts to resolve imagePullSecrets (false = anonymous registry access).
+  pullSecrets: true
 
 podAnnotations:
   prometheus.io/scrape: "true"
