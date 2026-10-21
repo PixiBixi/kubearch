@@ -1,6 +1,7 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "osvVulnerabilityAlerts": true,
+  "lockFileMaintenance": { "enabled": true, "automerge": true },
   "extends": [
     "config:recommended"
   ],
