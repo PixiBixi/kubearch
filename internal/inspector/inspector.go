@@ -27,6 +27,10 @@ import (
 // secrets do rotate, hence the expiry (and the eviction on auth failure).
 const credTTL = 5 * time.Minute
 
+// keychainTimeout bounds a shared keychain build, which runs detached from the
+// caller that started it so its cancellation cannot fail every waiter.
+const keychainTimeout = 15 * time.Second
+
 // PodAuth carries the authentication context derived from a pod spec.
 type PodAuth struct {
 	Namespace          string
@@ -150,6 +154,8 @@ func (i *Inspector) pullerFor(ctx context.Context, auth PodAuth) (*remote.Puller
 			return p, nil
 		}
 
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), keychainTimeout)
+		defer cancel()
 		kc, err := authnk8s.New(ctx, i.k8sClient, authnk8s.Options{
 			Namespace:          auth.Namespace,
 			ServiceAccountName: auth.ServiceAccountName,

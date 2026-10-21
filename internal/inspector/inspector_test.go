@@ -21,7 +21,9 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/random"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 )
 
 func TestNew(t *testing.T) {
@@ -364,5 +366,29 @@ func TestIsPermanent(t *testing.T) {
 				t.Errorf("IsPermanent(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// The keychain build is shared by every caller waiting on the same
+// credentials, so the caller that happened to start it must not be able to
+// cancel it for all of them. A real clientset is needed: the fake ignores ctx.
+func TestPullerFor_SharedBuildOutlivesLeaderCancellation(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}`)
+	}))
+	t.Cleanup(apiServer.Close)
+
+	client, err := kubernetes.NewForConfig(&rest.Config{Host: apiServer.URL})
+	if err != nil {
+		t.Fatalf("NewForConfig: %v", err)
+	}
+	insp := New(client, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := insp.pullerFor(ctx, PodAuth{Namespace: "prod", ServiceAccountName: "app"}); err != nil {
+		t.Errorf("pullerFor with a cancelled leader ctx: %v, want the shared build to complete", err)
 	}
 }
