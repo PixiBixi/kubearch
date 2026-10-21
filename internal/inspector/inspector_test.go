@@ -327,8 +327,8 @@ func TestIsAuthError(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isAuthError(tc.err); got != tc.want {
-				t.Errorf("isAuthError(%v) = %v, want %v", tc.err, got, tc.want)
+			if got := IsAuthError(tc.err); got != tc.want {
+				t.Errorf("IsAuthError(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
 	}

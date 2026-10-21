@@ -38,6 +38,9 @@ const (
 	// failedRetryInterval spaces the retries of an image that gave up while its
 	// pods still run: no resync and no spec change would ever re-queue it.
 	failedRetryInterval = 10 * time.Minute
+	// maxAuthsPerImage bounds the credential sets kept per image: enough for
+	// the workloads sharing an image, small enough to cost a few strings.
+	maxAuthsPerImage = 8
 	// shortDigestLen is "sha256:" (7 chars) + 12 hex chars, enough to identify a digest in logs.
 	shortDigestLen = 19
 	// workerLabel tags the inspection workers in profiles and tracebacks.
@@ -82,12 +85,12 @@ type Watcher struct {
 	// queue dedupes images, rate-limits retries and bounds the backlog.
 	queue workqueue.TypedRateLimitingInterface[string]
 
-	// authByImage keeps the pod credentials an image was discovered with, so a
-	// retry does not depend on the originating pod still being around. Entries
+	// authByImage keeps the distinct pod credentials an image was seen with, so
+	// a retry does not depend on the originating pod still being around. Entries
 	// live while a pod references the image, and only informer handlers (which
 	// run serially) write them: workers just read.
 	authMu      sync.Mutex
-	authByImage map[string]inspector.PodAuth
+	authByImage map[string][]inspector.PodAuth
 }
 
 // New builds a Watcher. metrics may be nil, in which case inspection
@@ -109,7 +112,7 @@ func New(client kubernetes.Interface, namespace string, s *store.Store, insp Ins
 			workqueue.NewTypedItemExponentialFailureRateLimiter[string](baseRetryDelay, maxRetryDelay),
 			workqueue.TypedRateLimitingQueueConfig[string]{Name: "images"},
 		),
-		authByImage: make(map[string]inspector.PodAuth),
+		authByImage: make(map[string][]inspector.PodAuth),
 	}
 }
 
@@ -251,8 +254,8 @@ func (w *Watcher) giveUp(imageRef string, attempts int, err error) {
 
 // inspect performs one inspection attempt and stores the result on success.
 func (w *Watcher) inspect(ctx context.Context, imageRef string) error {
-	auth, ok := w.authFor(imageRef)
-	if !ok {
+	auths := w.authFor(imageRef)
+	if len(auths) == 0 {
 		// Its last pod went away after the claim. Clear pending anyway so a stray
 		// queue entry can never pin the image (no-op if already clear).
 		w.store.FailImage(imageRef)
@@ -263,7 +266,7 @@ func (w *Watcher) inspect(ctx context.Context, imageRef string) error {
 	defer cancel()
 
 	start := time.Now()
-	digest, platforms, err := w.inspector.Inspect(ctx, imageRef, auth)
+	digest, platforms, err := w.inspectWith(ctx, imageRef, auths)
 	if err != nil {
 		w.metrics.ObserveInspection("failure", time.Since(start))
 		return fmt.Errorf("inspect %q: %w", imageRef, err)
@@ -277,6 +280,20 @@ func (w *Watcher) inspect(ctx context.Context, imageRef string) error {
 		"platforms", len(platforms),
 	)
 	return nil
+}
+
+// inspectWith tries each set of credentials in turn and moves on only when the
+// registry rejects one: no other error would change with different credentials.
+func (w *Watcher) inspectWith(ctx context.Context, imageRef string, auths []inspector.PodAuth) (digest string, platforms []types.Platform, err error) {
+	for _, auth := range auths {
+		digest, platforms, err = w.inspector.Inspect(ctx, imageRef, auth)
+		if !inspector.IsAuthError(err) {
+			return digest, platforms, err
+		}
+		w.logger.Debug("credentials rejected, trying the next ones", "image", imageRef,
+			"namespace", auth.Namespace, "serviceAccount", auth.ServiceAccountName)
+	}
+	return digest, platforms, err
 }
 
 // onPod reconciles a pod's image set and queues whatever needs inspecting.
@@ -309,20 +326,25 @@ func (w *Watcher) onDelete(pod *corev1.Pod) {
 	w.logger.Debug("pod removed", "pod", podRef)
 }
 
-// rememberAuth records auth for imageRef unless it already has credentials.
+// rememberAuth adds auth to the credentials of imageRef unless it is already
+// there or the set is full. The first sets seen win.
 func (w *Watcher) rememberAuth(imageRef string, auth inspector.PodAuth) {
 	w.authMu.Lock()
 	defer w.authMu.Unlock()
-	if _, ok := w.authByImage[imageRef]; !ok {
-		w.authByImage[imageRef] = auth
+	auths := w.authByImage[imageRef]
+	if len(auths) >= maxAuthsPerImage || slices.ContainsFunc(auths, func(a inspector.PodAuth) bool {
+		return sameAuth(a, auth)
+	}) {
+		return
 	}
+	w.authByImage[imageRef] = append(auths, auth)
 }
 
-func (w *Watcher) authFor(imageRef string) (inspector.PodAuth, bool) {
+// authFor returns a copy of the credentials of imageRef, in the order seen.
+func (w *Watcher) authFor(imageRef string) []inspector.PodAuth {
 	w.authMu.Lock()
 	defer w.authMu.Unlock()
-	auth, ok := w.authByImage[imageRef]
-	return auth, ok
+	return slices.Clone(w.authByImage[imageRef])
 }
 
 func (w *Watcher) forgetAuth(imageRefs ...string) {
@@ -331,6 +353,12 @@ func (w *Watcher) forgetAuth(imageRefs ...string) {
 	for _, imageRef := range imageRefs {
 		delete(w.authByImage, imageRef)
 	}
+}
+
+func sameAuth(a, b inspector.PodAuth) bool {
+	return a.Namespace == b.Namespace &&
+		a.ServiceAccountName == b.ServiceAccountName &&
+		slices.Equal(a.ImagePullSecrets, b.ImagePullSecrets)
 }
 
 // toPod extracts a *corev1.Pod from an event object, handling DeletedFinalStateUnknown.

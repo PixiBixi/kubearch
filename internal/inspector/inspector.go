@@ -89,7 +89,7 @@ func (i *Inspector) Inspect(ctx context.Context, imageRef string, auth PodAuth) 
 
 	desc, err := puller.Get(ctx, ref)
 	if err != nil {
-		if isAuthError(err) {
+		if IsAuthError(err) {
 			// Credentials may have rotated under us; the next attempt rebuilds them.
 			i.evict(auth)
 		}
@@ -204,9 +204,9 @@ func (i *Inspector) evict(auth PodAuth) {
 	delete(i.pullers, auth.cacheKey())
 }
 
-// isAuthError reports whether the registry rejected our credentials, as opposed
+// IsAuthError reports whether the registry rejected our credentials, as opposed
 // to the image being missing or the registry being unreachable.
-func isAuthError(err error) bool {
+func IsAuthError(err error) bool {
 	var terr *transport.Error
 	if !errors.As(err, &terr) {
 		return false

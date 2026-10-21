@@ -5,13 +5,16 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"runtime/pprof"
 	"slices"
+	"strconv"
 	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	corev1 "k8s.io/api/core/v1"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
@@ -416,19 +419,76 @@ func TestAuth_DroppedWithLastPod(t *testing.T) {
 		w.onPod(makePod("default", "pod2", "nginx:latest"))
 		settle(t, "both images", func() bool { return len(s.Snapshot()) == 2 })
 
-		if _, ok := w.authFor("nginx:latest"); !ok {
+		if len(w.authFor("nginx:latest")) == 0 {
 			t.Error("auth of a referenced, inspected image must be kept")
 		}
 
 		w.onPod(makePod("default", "pod1", "nginx:latest")) // update drops redis:7
-		if _, ok := w.authFor("redis:7"); ok {
+		if len(w.authFor("redis:7")) != 0 {
 			t.Error("auth of an image orphaned by an update must be dropped")
 		}
 
 		w.onDelete(pod1)
 		w.onDelete(makePod("default", "pod2", "nginx:latest"))
-		if _, ok := w.authFor("nginx:latest"); ok {
+		if len(w.authFor("nginx:latest")) != 0 {
 			t.Error("auth of an image orphaned by a delete must be dropped")
+		}
+	})
+}
+
+func makePodWithSA(ns, name, sa string, images ...string) *corev1.Pod {
+	pod := makePod(ns, name, images...)
+	pod.Spec.ServiceAccountName = sa
+	return pod
+}
+
+// Every pod referencing an image may bring credentials the first one lacks,
+// so each distinct set is kept, up to a bound.
+func TestAuth_KeepsDistinctCredentialsPerImage(t *testing.T) {
+	s := store.New()
+	w := newTestWatcher(s, &fakeInspector{})
+
+	w.onPod(makePodWithSA("default", "pod1", "sa-a", "private:image"))
+	w.onPod(makePodWithSA("default", "pod2", "sa-a", "private:image")) // same credentials
+	w.onPod(makePodWithSA("default", "pod3", "sa-b", "private:image"))
+
+	got := w.authFor("private:image")
+	if len(got) != 2 || got[0].ServiceAccountName != "sa-a" || got[1].ServiceAccountName != "sa-b" {
+		t.Fatalf("authFor = %+v, want sa-a then sa-b", got)
+	}
+
+	for i := range 2 * maxAuthsPerImage {
+		n := strconv.Itoa(i)
+		w.onPod(makePodWithSA("default", "extra-"+n, "sa-"+n, "private:image"))
+	}
+	if got := len(w.authFor("private:image")); got != maxAuthsPerImage {
+		t.Errorf("credentials kept = %d, want the bound %d", got, maxAuthsPerImage)
+	}
+}
+
+// A 401 under one pod's credentials says nothing about another pod's: the
+// next set is tried before the attempt counts as a failure.
+func TestInspect_TriesNextCredentialsOnAuthError(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		metrics := &fakeMetrics{}
+		w := newTestWatcherWithMetrics(s, &fakeInspector{
+			fn: func(_ context.Context, _ string, auth inspector.PodAuth) (string, []types.Platform, error) {
+				if auth.ServiceAccountName != "puller" {
+					return "", nil, &transport.Error{StatusCode: http.StatusUnauthorized}
+				}
+				return "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+			},
+		}, metrics)
+
+		// Both pods land before any worker runs, as on an initial sync.
+		w.onPod(makePodWithSA("default", "pod1", "default", "private:image"))
+		w.onPod(makePodWithSA("default", "pod2", "puller", "private:image"))
+		startWorkers(t, w)
+
+		settle(t, "the image to be inspected", func() bool { return len(s.Snapshot()) == 1 })
+		if _, retries := metrics.snapshot(); retries != 0 {
+			t.Errorf("retries = %d, want 0: the second credentials should be tried in the same attempt", retries)
 		}
 	})
 }
