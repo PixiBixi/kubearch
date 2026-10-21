@@ -213,3 +213,21 @@ func IsAuthError(err error) bool {
 	}
 	return terr.StatusCode == http.StatusUnauthorized || terr.StatusCode == http.StatusForbidden
 }
+
+// IsPermanent reports whether retrying err within minutes is pointless: the
+// manifest or repository does not exist, or the reference does not parse.
+func IsPermanent(err error) bool {
+	if _, ok := errors.AsType[*name.ErrBadName](err); ok {
+		return true
+	}
+	terr, ok := errors.AsType[*transport.Error](err)
+	if !ok {
+		return false
+	}
+	if terr.StatusCode == http.StatusNotFound {
+		return true
+	}
+	return slices.ContainsFunc(terr.Errors, func(d transport.Diagnostic) bool {
+		return d.Code == transport.ManifestUnknownErrorCode || d.Code == transport.NameUnknownErrorCode
+	})
+}

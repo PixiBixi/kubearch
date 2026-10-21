@@ -333,3 +333,36 @@ func TestIsAuthError(t *testing.T) {
 		})
 	}
 }
+
+func TestIsPermanent(t *testing.T) {
+	_, _, parseErr := New(fake.NewClientset(), slog.New(slog.NewTextHandler(io.Discard, nil))).
+		Inspect(context.Background(), ":::invalid:::", PodAuth{})
+
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"not found", &transport.Error{StatusCode: http.StatusNotFound}, true},
+		{"manifest unknown", &transport.Error{
+			StatusCode: http.StatusBadRequest,
+			Errors:     []transport.Diagnostic{{Code: transport.ManifestUnknownErrorCode}},
+		}, true},
+		{"name unknown", fmt.Errorf("fetch: %w", &transport.Error{
+			StatusCode: http.StatusBadRequest,
+			Errors:     []transport.Diagnostic{{Code: transport.NameUnknownErrorCode}},
+		}), true},
+		{"bad reference", parseErr, true},
+		{"unauthorized", &transport.Error{StatusCode: http.StatusUnauthorized}, false},
+		{"unavailable", &transport.Error{StatusCode: http.StatusServiceUnavailable}, false},
+		{"plain error", errors.New("connection refused"), false},
+		{"nil", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsPermanent(tc.err); got != tc.want {
+				t.Errorf("IsPermanent(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}

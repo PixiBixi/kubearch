@@ -363,6 +363,38 @@ func TestInspect_SlowRetryAfterGivingUp(t *testing.T) {
 	})
 }
 
+// A missing manifest or a malformed reference will not fix itself within the
+// backoff window: retrying it only burns registry quota.
+func TestInspect_GivesUpAtOnceOnPermanentError(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		var mu sync.Mutex
+		calls := 0
+
+		w := newTestWatcher(s, &fakeInspector{
+			fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+				mu.Lock()
+				calls++
+				mu.Unlock()
+				return "", nil, &transport.Error{StatusCode: http.StatusNotFound}
+			},
+		})
+		startWorkers(t, w)
+
+		w.onPod(makePod("default", "pod1", "missing:image"))
+		synctest.Sleep(5 * time.Minute) // well past the whole fast retry window
+
+		mu.Lock()
+		defer mu.Unlock()
+		if calls != 1 {
+			t.Errorf("expected 1 attempt for a permanent error, got %d", calls)
+		}
+		if _, pending, _ := s.Stats(); pending != 0 {
+			t.Errorf("expected 0 pending images after giving up, got %d", pending)
+		}
+	})
+}
+
 // The slow retry is only for images a live pod still runs.
 func TestInspect_NoSlowRetryOncePodIsGone(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {

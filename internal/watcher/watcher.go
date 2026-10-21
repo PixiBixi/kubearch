@@ -228,6 +228,9 @@ func (w *Watcher) processNext(ctx context.Context) bool {
 		w.queue.Forget(imageRef)
 		w.store.FailImage(imageRef)
 
+	case inspector.IsPermanent(err):
+		w.giveUp(imageRef, w.queue.NumRequeues(imageRef)+1, err)
+
 	case w.queue.NumRequeues(imageRef)+1 >= maxAttempts:
 		w.giveUp(imageRef, maxAttempts, err)
 
