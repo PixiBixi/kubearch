@@ -93,9 +93,13 @@ func main() {
 	reg.MustRegister(collector.New(s, collector.WithDigestLabel(*digestLabel)))
 	reg.MustRegister(selfMetrics)
 
+	// A Run error with ctx still live is a real failure: record it so the
+	// process exits non-zero once the server has drained.
+	watcherErr := make(chan error, 1)
 	go func() {
-		if err := w.Run(ctx); err != nil {
+		if err := w.Run(ctx); err != nil && ctx.Err() == nil {
 			logger.Error("watcher exited with error", "err", err)
+			watcherErr <- err
 			stop()
 		}
 	}()
@@ -106,6 +110,7 @@ func main() {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+	mux.HandleFunc("GET /readyz", readyHandler(w.HasSynced))
 
 	srv := &http.Server{
 		Addr:    *addr,
@@ -113,10 +118,21 @@ func main() {
 		// Bound the header read phase: a scrape endpoint has no reason to keep
 		// a half-open connection alive (Slowloris).
 		ReadHeaderTimeout: 10 * time.Second,
+		// Well above a typical scrape timeout, so a stuck client cannot pin a
+		// connection forever.
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
+
+	// ListenAndServe returns as soon as Shutdown starts, so main must wait on
+	// shutdownDone or it exits mid-drain.
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
-		if err := srv.Shutdown(context.Background()); err != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
 			logger.Error("graceful shutdown error", "err", err)
 		}
 	}()
@@ -125,7 +141,30 @@ func main() {
 		logger.Error("server error", "err", err)
 		os.Exit(1)
 	}
+	<-shutdownDone
 	logger.Info("server stopped")
+
+	select {
+	case err := <-watcherErr:
+		logger.Error("exiting after watcher failure", "err", err)
+		os.Exit(1)
+	default:
+	}
+}
+
+// shutdownTimeout bounds how long in-flight scrapes get to finish on SIGTERM.
+const shutdownTimeout = 10 * time.Second
+
+// readyHandler answers 200 once synced reports true, 503 before: the exporter
+// has nothing meaningful to serve until the informer cache is populated.
+func readyHandler(synced func() bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !synced() {
+			http.Error(w, "informer cache not synced", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}
 }
 
 // buildK8sClient resolves the Kubernetes client config with the following priority:

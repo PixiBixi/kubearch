@@ -9,6 +9,7 @@ import (
 	"runtime/pprof"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -95,6 +96,9 @@ type Watcher struct {
 	// run serially) write them: workers just read.
 	authMu      sync.Mutex
 	authByImage map[string][]inspector.PodAuth
+
+	// synced flips once the informer cache is populated, for readiness.
+	synced atomic.Bool
 }
 
 // Option configures a Watcher constructed via New.
@@ -140,6 +144,12 @@ func New(client kubernetes.Interface, namespace string, s *store.Store, insp Ins
 // queue, for self-monitoring.
 func (w *Watcher) QueueDepth() int {
 	return w.queue.Len()
+}
+
+// HasSynced reports whether the initial pod list has been loaded into the
+// informer cache.
+func (w *Watcher) HasSynced() bool {
+	return w.synced.Load()
 }
 
 // Run starts the pod informer and blocks until ctx is cancelled.
@@ -189,6 +199,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 		return errors.New("timed out waiting for pod cache sync")
 	}
 
+	w.synced.Store(true)
 	ns := w.namespace
 	if ns == "" {
 		ns = "all"

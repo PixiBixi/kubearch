@@ -1037,3 +1037,27 @@ func TestShortDigest_Exactly19(t *testing.T) {
 		t.Errorf("shortDigest of 19-char digest = %q, want %q", got, digest)
 	}
 }
+
+func TestHasSynced_AfterRun(t *testing.T) {
+	w := newTestWatcher(store.New(), &fakeInspector{})
+	if w.HasSynced() {
+		t.Fatal("HasSynced() = true before Run")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !w.HasSynced() {
+		if time.Now().After(deadline) {
+			t.Fatal("HasSynced() still false 5s after Run started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("Run returned %v on clean cancel, want nil", err)
+	}
+}

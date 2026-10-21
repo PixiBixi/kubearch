@@ -3,6 +3,8 @@ package main
 import (
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -70,5 +72,22 @@ func TestBuildK8sClient_InvalidContext(t *testing.T) {
 	_, err := buildK8sClient(path, "nonexistent-context", logger)
 	if err == nil {
 		t.Error("expected error for context not found in kubeconfig")
+	}
+}
+
+func TestReadyHandler(t *testing.T) {
+	synced := false
+	h := readyHandler(func() bool { return synced })
+
+	for _, tc := range []struct {
+		synced bool
+		want   int
+	}{{false, http.StatusServiceUnavailable}, {true, http.StatusOK}} {
+		synced = tc.synced
+		rec := httptest.NewRecorder()
+		h(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		if rec.Code != tc.want {
+			t.Errorf("synced=%v: status = %d, want %d", tc.synced, rec.Code, tc.want)
+		}
 	}
 }
