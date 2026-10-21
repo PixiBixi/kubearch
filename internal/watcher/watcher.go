@@ -35,6 +35,9 @@ const (
 	maxAttempts    = 5
 	baseRetryDelay = 1 * time.Second
 	maxRetryDelay  = 1 * time.Minute
+	// failedRetryInterval spaces the retries of an image that gave up while its
+	// pods still run: no resync and no spec change would ever re-queue it.
+	failedRetryInterval = 10 * time.Minute
 	// shortDigestLen is "sha256:" (7 chars) + 12 hex chars, enough to identify a digest in logs.
 	shortDigestLen = 19
 	// workerLabel tags the inspection workers in profiles and tracebacks.
@@ -81,7 +84,8 @@ type Watcher struct {
 
 	// authByImage keeps the pod credentials an image was discovered with, so a
 	// retry does not depend on the originating pod still being around. Entries
-	// live only while the image is queued.
+	// live while a pod references the image, and only informer handlers (which
+	// run serially) write them: workers just read.
 	authMu      sync.Mutex
 	authByImage map[string]inspector.PodAuth
 }
@@ -204,6 +208,13 @@ func (w *Watcher) processNext(ctx context.Context) bool {
 	}
 	defer w.queue.Done(imageRef)
 
+	// Slow retries are queued with pending clear, and any entry may have gone
+	// stale (resolved, or its pods deleted) while it waited.
+	if !w.store.ClaimPending(imageRef) {
+		w.queue.Forget(imageRef)
+		return true
+	}
+
 	err := w.inspect(ctx, imageRef)
 	switch {
 	case err == nil:
@@ -212,18 +223,10 @@ func (w *Watcher) processNext(ctx context.Context) bool {
 	case ctx.Err() != nil:
 		// Shutting down: drop the item without burning a retry.
 		w.queue.Forget(imageRef)
-		w.forgetAuth(imageRef)
 		w.store.FailImage(imageRef)
 
 	case w.queue.NumRequeues(imageRef)+1 >= maxAttempts:
-		w.logger.Error("inspection failed, giving up",
-			"image", imageRef, "attempts", maxAttempts, "err", err)
-		w.queue.Forget(imageRef)
-		// Auth goes before pending: in the other order a pod re-queuing the image
-		// in between loses its auth and the image stays pending forever.
-		w.forgetAuth(imageRef)
-		// Clearing pending lets a later pod event re-trigger the image.
-		w.store.FailImage(imageRef)
+		w.giveUp(imageRef, maxAttempts, err)
 
 	default:
 		w.logger.Warn("inspection failed, retrying",
@@ -234,12 +237,24 @@ func (w *Watcher) processNext(ctx context.Context) bool {
 	return true
 }
 
+// giveUp takes imageRef out of the fast retry loop. Clearing pending lets a new
+// pod re-trigger it at once; the slow retry covers pods that just keep running.
+func (w *Watcher) giveUp(imageRef string, attempts int, err error) {
+	w.logger.Error("inspection failed, giving up",
+		"image", imageRef, "attempts", attempts, "err", err)
+	w.queue.Forget(imageRef)
+	w.store.FailImage(imageRef)
+	if referenced, known := w.store.State(imageRef); referenced && !known {
+		w.queue.AddAfter(imageRef, failedRetryInterval)
+	}
+}
+
 // inspect performs one inspection attempt and stores the result on success.
 func (w *Watcher) inspect(ctx context.Context, imageRef string) error {
 	auth, ok := w.authFor(imageRef)
 	if !ok {
-		// No longer tracked: resolved or dropped meanwhile. Clear pending anyway
-		// so a stray queue entry can never pin the image (no-op if already clear).
+		// Its last pod went away after the claim. Clear pending anyway so a stray
+		// queue entry can never pin the image (no-op if already clear).
 		w.store.FailImage(imageRef)
 		return nil
 	}
@@ -255,7 +270,6 @@ func (w *Watcher) inspect(ctx context.Context, imageRef string) error {
 	}
 	w.metrics.ObserveInspection("success", time.Since(start))
 
-	w.forgetAuth(imageRef)
 	w.store.SetImage(imageRef, digest, platforms)
 	w.logger.Info("inspection done",
 		"image", imageRef,
@@ -275,8 +289,15 @@ func (w *Watcher) onPod(pod *corev1.Pod) {
 		ImagePullSecrets:   pullSecretNames(pod),
 	}
 
-	for _, imageRef := range w.store.SetPodImages(podRef, slices.Collect(uniqueImages(pod))) {
+	images := slices.Collect(uniqueImages(pod))
+	// Auth goes in before the store sees the pod, so a queued image always has it.
+	for _, imageRef := range images {
 		w.rememberAuth(imageRef, auth)
+	}
+	toInspect, orphaned := w.store.SetPodImages(podRef, images)
+	w.forgetAuth(orphaned...)
+
+	for _, imageRef := range toInspect {
 		w.queue.Add(imageRef)
 		w.logger.Info("new image detected, queuing inspection", "image", imageRef, "pod", podRef)
 	}
@@ -284,14 +305,17 @@ func (w *Watcher) onPod(pod *corev1.Pod) {
 
 func (w *Watcher) onDelete(pod *corev1.Pod) {
 	podRef := pod.Namespace + "/" + pod.Name
-	w.store.RemovePod(podRef)
+	w.forgetAuth(w.store.RemovePod(podRef)...)
 	w.logger.Debug("pod removed", "pod", podRef)
 }
 
+// rememberAuth records auth for imageRef unless it already has credentials.
 func (w *Watcher) rememberAuth(imageRef string, auth inspector.PodAuth) {
 	w.authMu.Lock()
 	defer w.authMu.Unlock()
-	w.authByImage[imageRef] = auth
+	if _, ok := w.authByImage[imageRef]; !ok {
+		w.authByImage[imageRef] = auth
+	}
 }
 
 func (w *Watcher) authFor(imageRef string) (inspector.PodAuth, bool) {
@@ -301,10 +325,12 @@ func (w *Watcher) authFor(imageRef string) (inspector.PodAuth, bool) {
 	return auth, ok
 }
 
-func (w *Watcher) forgetAuth(imageRef string) {
+func (w *Watcher) forgetAuth(imageRefs ...string) {
 	w.authMu.Lock()
 	defer w.authMu.Unlock()
-	delete(w.authByImage, imageRef)
+	for _, imageRef := range imageRefs {
+		delete(w.authByImage, imageRef)
+	}
 }
 
 // toPod extracts a *corev1.Pod from an event object, handling DeletedFinalStateUnknown.

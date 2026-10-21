@@ -12,7 +12,8 @@ var linuxAmd64 = []types.Platform{{OS: "linux", Arch: "amd64"}}
 
 // track registers a single image for a pod and reports whether it needs inspection.
 func track(s *Store, podRef, imageRef string) bool {
-	return len(s.SetPodImages(podRef, []string{imageRef})) == 1
+	toInspect, _ := s.SetPodImages(podRef, []string{imageRef})
+	return len(toInspect) == 1
 }
 
 func TestNew(t *testing.T) {
@@ -63,7 +64,7 @@ func TestSetPodImages_SamePodSameImage(t *testing.T) {
 
 func TestSetPodImages_DedupsWithinPod(t *testing.T) {
 	s := New()
-	got := s.SetPodImages("ns/pod1", []string{"nginx:latest", "nginx:latest", "redis:7"})
+	got, _ := s.SetPodImages("ns/pod1", []string{"nginx:latest", "nginx:latest", "redis:7"})
 	if len(got) != 2 {
 		t.Fatalf("expected 2 images to inspect, got %d (%v)", len(got), got)
 	}
@@ -79,7 +80,7 @@ func TestSetPodImages_ReplacesImageSet(t *testing.T) {
 	track(s, "ns/pod1", "nginx:1.26")
 	s.SetImage("nginx:1.26", "sha256:old", linuxAmd64)
 
-	toInspect := s.SetPodImages("ns/pod1", []string{"nginx:1.27"})
+	toInspect, _ := s.SetPodImages("ns/pod1", []string{"nginx:1.27"})
 
 	if !slices.Equal(toInspect, []string{"nginx:1.27"}) {
 		t.Errorf("toInspect = %v, want [nginx:1.27]", toInspect)
@@ -282,4 +283,88 @@ func TestConcurrentAccess(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// The watcher keeps per-image credentials while the image is referenced, so
+// the store must say which images an update or a delete orphaned.
+func TestSetPodImages_ReportsOrphans(t *testing.T) {
+	s := New()
+	s.SetPodImages("ns/pod1", []string{"nginx:1.26", "redis:7"})
+	track(s, "ns/pod2", "redis:7")
+
+	_, orphaned := s.SetPodImages("ns/pod1", []string{"nginx:1.27"})
+
+	if !slices.Equal(orphaned, []string{"nginx:1.26"}) {
+		t.Errorf("orphaned = %v, want [nginx:1.26] (redis:7 is still used by pod2)", orphaned)
+	}
+}
+
+func TestRemovePod_ReportsOrphans(t *testing.T) {
+	s := New()
+	s.SetPodImages("ns/pod1", []string{"nginx:latest", "redis:7"})
+	track(s, "ns/pod2", "redis:7")
+
+	if got := s.RemovePod("ns/pod1"); !slices.Equal(got, []string{"nginx:latest"}) {
+		t.Errorf("RemovePod orphaned = %v, want [nginx:latest]", got)
+	}
+	if got := s.RemovePod("ns/pod2"); !slices.Equal(got, []string{"redis:7"}) {
+		t.Errorf("RemovePod orphaned = %v, want [redis:7]", got)
+	}
+}
+
+func TestState(t *testing.T) {
+	s := New()
+	if referenced, known := s.State("nginx:latest"); referenced || known {
+		t.Errorf("State of an unseen image = (%v, %v), want (false, false)", referenced, known)
+	}
+
+	track(s, "ns/pod1", "nginx:latest")
+	if referenced, known := s.State("nginx:latest"); !referenced || known {
+		t.Errorf("State while pending = (%v, %v), want (true, false)", referenced, known)
+	}
+
+	s.SetImage("nginx:latest", "sha256:abc", linuxAmd64)
+	if referenced, known := s.State("nginx:latest"); !referenced || !known {
+		t.Errorf("State once inspected = (%v, %v), want (true, true)", referenced, known)
+	}
+}
+
+// A slow retry is queued with pending clear, so the worker has to re-claim it.
+func TestClaimPending_ReclaimsReferencedImage(t *testing.T) {
+	s := New()
+	track(s, "ns/pod1", "nginx:latest")
+	s.FailImage("nginx:latest")
+
+	if !s.ClaimPending("nginx:latest") {
+		t.Fatal("a referenced, unknown image must be claimable")
+	}
+	if track(s, "ns/pod2", "nginx:latest") {
+		t.Error("a claimed image must not be queued a second time by a pod event")
+	}
+	if !s.ClaimPending("nginx:latest") {
+		t.Error("claiming an image the caller already owns must succeed")
+	}
+}
+
+func TestClaimPending_RefusesKnownImage(t *testing.T) {
+	s := New()
+	track(s, "ns/pod1", "nginx:latest")
+	s.SetImage("nginx:latest", "sha256:abc", linuxAmd64)
+
+	if s.ClaimPending("nginx:latest") {
+		t.Error("an already inspected image must not be claimed")
+	}
+}
+
+func TestClaimPending_ReleasesOrphan(t *testing.T) {
+	s := New()
+	track(s, "ns/pod1", "nginx:latest")
+	s.RemovePod("ns/pod1") // pending survives the unlink, owned by the queue
+
+	if s.ClaimPending("nginx:latest") {
+		t.Error("an image no pod references must not be claimed")
+	}
+	if _, pending, _ := s.Stats(); pending != 0 {
+		t.Errorf("pending = %d after a refused claim, want 0", pending)
+	}
 }

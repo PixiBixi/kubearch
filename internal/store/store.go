@@ -41,13 +41,13 @@ func New() *Store {
 // refs that require inspection (neither known nor already in flight). Images the
 // pod no longer references are unlinked, and dropped entirely once no pod uses
 // them, which is what makes this safe to call on pod updates, not just adds.
-func (s *Store) SetPodImages(podRef string, imageRefs []string) []string {
+// Those dropped images are returned as orphaned.
+func (s *Store) SetPodImages(podRef string, imageRefs []string) (toInspect, orphaned []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	current := s.podImages[podRef]
 	next := make(map[string]struct{}, len(imageRefs))
-	var toInspect []string
 
 	for _, imageRef := range imageRefs {
 		if _, dup := next[imageRef]; dup {
@@ -71,13 +71,13 @@ func (s *Store) SetPodImages(podRef string, imageRefs []string) []string {
 	}
 
 	for imageRef := range current {
-		if _, still := next[imageRef]; !still {
-			s.unlink(podRef, imageRef)
+		if _, still := next[imageRef]; !still && s.unlink(podRef, imageRef) {
+			orphaned = append(orphaned, imageRef)
 		}
 	}
 	s.podImages[podRef] = next
 
-	return toInspect
+	return toInspect, orphaned
 }
 
 // SetImage stores the inspection result.
@@ -98,6 +98,31 @@ func (s *Store) SetImage(imageRef, digest string, platforms []types.Platform) {
 	}
 }
 
+// ClaimPending marks imageRef as in flight and reports whether the caller
+// should inspect it: a pod still references it and it has no result yet. On a
+// refusal pending is cleared, since the queue is the only owner of that slot.
+func (s *Store) ClaimPending(imageRef string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, known := s.images[imageRef]
+	if known || len(s.imagePods[imageRef]) == 0 {
+		delete(s.pending, imageRef)
+		return false
+	}
+	s.pending[imageRef] = struct{}{}
+	return true
+}
+
+// State reports whether any pod references imageRef and whether it has an
+// inspection result.
+func (s *Store) State(imageRef string) (referenced, known bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, known = s.images[imageRef]
+	return len(s.imagePods[imageRef]) > 0, known
+}
+
 // FailImage removes imageRef from pending after a failed inspection,
 // allowing the next pod event to re-trigger it.
 func (s *Store) FailImage(imageRef string) {
@@ -106,34 +131,39 @@ func (s *Store) FailImage(imageRef string) {
 	delete(s.pending, imageRef)
 }
 
-// RemovePod unregisters all images for a pod and removes orphaned entries.
-func (s *Store) RemovePod(podRef string) {
+// RemovePod unregisters all images for a pod, removes orphaned entries and
+// returns their refs.
+func (s *Store) RemovePod(podRef string) (orphaned []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	imageRefs, ok := s.podImages[podRef]
 	if !ok {
-		return
+		return nil
 	}
 	delete(s.podImages, podRef)
 
 	for imageRef := range imageRefs {
-		s.unlink(podRef, imageRef)
+		if s.unlink(podRef, imageRef) {
+			orphaned = append(orphaned, imageRef)
+		}
 	}
+	return orphaned
 }
 
 // unlink drops the podRef→imageRef edge and forgets the image once it is
-// orphaned. Must be called with the write lock held.
-func (s *Store) unlink(podRef, imageRef string) {
+// orphaned, reporting whether it was. Must be called with the write lock held.
+func (s *Store) unlink(podRef, imageRef string) bool {
 	pods := s.imagePods[imageRef]
 	delete(pods, podRef)
 	if len(pods) > 0 {
-		return
+		return false
 	}
 	delete(s.imagePods, imageRef)
 	delete(s.images, imageRef)
 	// pending is deliberately left alone: an in-flight inspection still owns
-	// that slot and clears it via SetImage/FailImage.
+	// that slot and clears it via SetImage/FailImage/ClaimPending.
+	return true
 }
 
 // Snapshot returns a point-in-time copy of all known images.

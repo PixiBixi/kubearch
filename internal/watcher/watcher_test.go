@@ -322,6 +322,117 @@ func TestInspect_GivesUpAfterMaxAttempts(t *testing.T) {
 	})
 }
 
+// Informer resync is off and status updates are short-circuited, so a pod that
+// outlives a registry outage would never get its image inspected without a
+// slow retry. The retry must still find the pod's credentials.
+func TestInspect_SlowRetryAfterGivingUp(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		var mu sync.Mutex
+		calls := 0
+
+		w := newTestWatcher(s, &fakeInspector{
+			fn: func(_ context.Context, _ string, auth inspector.PodAuth) (string, []types.Platform, error) {
+				mu.Lock()
+				calls++
+				n := calls
+				mu.Unlock()
+				if auth.Namespace != "default" {
+					return "", nil, errors.New("inspected without the pod's credentials")
+				}
+				if n <= maxAttempts {
+					return "", nil, errors.New("registry down")
+				}
+				return "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+			},
+		})
+		startWorkers(t, w)
+
+		w.onPod(makePod("default", "pod1", "flaky:image"))
+		settle(t, "the retries to be exhausted", func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return calls == maxAttempts
+		})
+
+		synctest.Sleep(failedRetryInterval)
+		settle(t, "the slow retry to succeed", func() bool { return len(s.Snapshot()) == 1 })
+	})
+}
+
+// The slow retry is only for images a live pod still runs.
+func TestInspect_NoSlowRetryOncePodIsGone(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		var mu sync.Mutex
+		calls := 0
+
+		w := newTestWatcher(s, &fakeInspector{
+			fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+				mu.Lock()
+				calls++
+				mu.Unlock()
+				return "", nil, errors.New("registry down")
+			},
+		})
+		startWorkers(t, w)
+
+		pod := makePod("default", "pod1", "broken:image")
+		w.onPod(pod)
+		settle(t, "the retries to be exhausted", func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return calls == maxAttempts
+		})
+		w.onDelete(pod)
+
+		synctest.Sleep(3 * failedRetryInterval)
+
+		mu.Lock()
+		defer mu.Unlock()
+		if calls != maxAttempts {
+			t.Errorf("expected %d attempts after the pod was deleted, got %d", maxAttempts, calls)
+		}
+		if _, pending, _ := s.Stats(); pending != 0 {
+			t.Errorf("expected 0 pending images, got %d", pending)
+		}
+	})
+}
+
+// Credentials are kept while an image is referenced and dropped with its
+// last pod, so the map is bounded by the live image set.
+func TestAuth_DroppedWithLastPod(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := store.New()
+		w := newTestWatcher(s, &fakeInspector{
+			fn: func(_ context.Context, _ string, _ inspector.PodAuth) (string, []types.Platform, error) {
+				return "sha256:abc", []types.Platform{{OS: "linux", Arch: "amd64"}}, nil
+			},
+		})
+		startWorkers(t, w)
+
+		pod1 := makePod("default", "pod1", "nginx:latest", "redis:7")
+		w.onPod(pod1)
+		w.onPod(makePod("default", "pod2", "nginx:latest"))
+		settle(t, "both images", func() bool { return len(s.Snapshot()) == 2 })
+
+		if _, ok := w.authFor("nginx:latest"); !ok {
+			t.Error("auth of a referenced, inspected image must be kept")
+		}
+
+		w.onPod(makePod("default", "pod1", "nginx:latest")) // update drops redis:7
+		if _, ok := w.authFor("redis:7"); ok {
+			t.Error("auth of an image orphaned by an update must be dropped")
+		}
+
+		w.onDelete(pod1)
+		w.onDelete(makePod("default", "pod2", "nginx:latest"))
+		if _, ok := w.authFor("nginx:latest"); ok {
+			t.Error("auth of an image orphaned by a delete must be dropped")
+		}
+	})
+}
+
 // A queued image whose auth entry is gone (a pod event racing the worker's
 // cleanup) must not stay pending forever, or no later pod could re-trigger it.
 func TestInspect_MissingAuthClearsPending(t *testing.T) {
