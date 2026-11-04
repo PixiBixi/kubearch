@@ -30,7 +30,7 @@ git tag -a vX.Y.Z -m "..."
 git push origin vX.Y.Z
 ```
 
-Pre-commit hooks run `go fmt`, `go vet`, `go mod tidy`, `go build`, and `staticcheck` automatically. Install once with `pre-commit install`.
+prek hooks run `go fmt`, `go vet`, `go mod tidy`, `go build`, and `staticcheck` automatically. Install once with `prek install`.
 
 ## Architecture
 
